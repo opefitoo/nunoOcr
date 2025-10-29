@@ -1,12 +1,12 @@
-version: "3.9"
-
 services:
   deepseek-ocr:
-    image: ghcr.io/timmyovo/deepseek-ocr.rs:latest
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.python
     container_name: nunoocr_deepseek
     restart: unless-stopped
 
-    # Uncomment the following for NVIDIA GPU support
+    # Uncomment for NVIDIA GPU support
     # deploy:
     #   resources:
     #     reservations:
@@ -18,28 +18,31 @@ services:
 
     environment:
       # Model will auto-download on first run
-      - DS_OCR_MODEL=deepseek-ai/DeepSeek-OCR
-      - RUST_LOG=info
-      - SERVER_HOST=0.0.0.0
-      - SERVER_PORT=8000
-      # Optional: API key for authentication
+      - MODEL_NAME=deepseek-ai/DeepSeek-OCR
+      - HOST=0.0.0.0
+      - PORT=8000
       - API_KEY=${API_KEY:-}
+      # vLLM settings
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 
     ports:
-      - "8765:8000"  # Host:Container - Using 8765 to avoid conflicts
+      - "8765:8000"
 
     volumes:
-      # Cache model weights locally to avoid re-downloading
-      - ./models:/models
-      # Optional: persistent logs
-      - ./logs:/logs
+      # Cache Hugging Face models
+      - huggingface-cache:/root/.cache/huggingface
+      # Optional: logs
+      - ./logs:/app/logs
 
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s  # Give time for model download on first start
+      start_period: 120s  # Give time for model download
+
+    # Resource limits (adjust based on your system)
+    shm_size: '2gb'
 
     networks:
       - ocr-network
@@ -50,5 +53,5 @@ networks:
     name: nunoocr_network
 
 volumes:
-  models:
-    name: nunoocr_models
+  huggingface-cache:
+    name: nunoocr_hf_cache
