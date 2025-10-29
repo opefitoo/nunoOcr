@@ -1,0 +1,41 @@
+# DeepSeek-OCR Python service using vLLM
+# Supports both CPU and GPU inference
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip
+
+# Install vLLM and dependencies
+# vLLM now has official DeepSeek-OCR support (as of Oct 2025)
+RUN pip install --no-cache-dir \
+    vllm \
+    "transformers>=4.45.0" \
+    torch \
+    pillow \
+    fastapi \
+    uvicorn[standard] \
+    python-multipart
+
+# Create app directory
+COPY server.py /app/
+
+# Health check endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Expose port
+EXPOSE 8000
+
+# Run the server
+CMD ["python", "server.py"]

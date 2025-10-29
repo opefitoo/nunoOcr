@@ -1,0 +1,63 @@
+version: "3.9"
+
+# Python-based DeepSeek-OCR service using vLLM
+# This is an alternative to the Rust implementation
+
+services:
+  deepseek-ocr-python:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile.python
+    container_name: nunoocr_deepseek_python
+    restart: unless-stopped
+
+    # Uncomment for NVIDIA GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    # runtime: nvidia
+
+    environment:
+      - MODEL_NAME=deepseek-ai/DeepSeek-OCR
+      - HOST=0.0.0.0
+      - PORT=8000
+      # vLLM settings
+      - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+      - CUDA_VISIBLE_DEVICES=0  # GPU to use (if available)
+
+    ports:
+      - "8765:8000"
+
+    volumes:
+      # Cache Hugging Face models
+      - huggingface-cache:/root/.cache/huggingface
+      # Optional: logs
+      - ./logs:/app/logs
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s  # Give time for model download
+
+    # Resource limits (adjust based on your system)
+    # CPU mode: 8GB RAM minimum
+    # GPU mode: 12GB VRAM minimum
+    shm_size: '2gb'
+
+    networks:
+      - ocr-network
+
+networks:
+  ocr-network:
+    driver: bridge
+    name: nunoocr_network
+
+volumes:
+  huggingface-cache:
+    name: nunoocr_hf_cache

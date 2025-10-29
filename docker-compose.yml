@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  deepseek-ocr:
+    image: ghcr.io/timmyovo/deepseek-ocr.rs:latest
+    container_name: nunoocr_deepseek
+    restart: unless-stopped
+
+    # Uncomment the following for NVIDIA GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    # runtime: nvidia
+
+    environment:
+      # Model will auto-download on first run
+      - DS_OCR_MODEL=deepseek-ai/DeepSeek-OCR
+      - RUST_LOG=info
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8000
+      # Optional: API key for authentication
+      - API_KEY=${API_KEY:-}
+
+    ports:
+      - "8765:8000"  # Host:Container - Using 8765 to avoid conflicts
+
+    volumes:
+      # Cache model weights locally to avoid re-downloading
+      - ./models:/models
+      # Optional: persistent logs
+      - ./logs:/logs
+
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s  # Give time for model download on first start
+
+    networks:
+      - ocr-network
+
+networks:
+  ocr-network:
+    driver: bridge
+    name: nunoocr_network
+
+volumes:
+  models:
+    name: nunoocr_models
