@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y \
 RUN pip install --no-cache-dir --upgrade pip
 
 # Install transformers and dependencies (without vLLM)
+# Note: DeepSeek-OCR has many undocumented dependencies
 RUN pip install --no-cache-dir \
     "transformers>=4.45.0" \
     "torch>=2.0.0" \
@@ -27,10 +28,14 @@ RUN pip install --no-cache-dir \
     "uvicorn[standard]>=0.24.0" \
     "python-multipart>=0.0.6" \
     "addict>=2.4.0" \
+    "easydict>=1.10" \
     "matplotlib>=3.7.0" \
     "einops>=0.7.0" \
     "timm>=0.9.0" \
-    "sentencepiece>=0.1.99"
+    "sentencepiece>=0.1.99" \
+    "opencv-python-headless>=4.8.0" \
+    "numpy>=1.24.0" \
+    "scipy>=1.10.0"
 
 # Copy the transformers-based server
 COPY server_transformers.py /app/server.py
