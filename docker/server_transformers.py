@@ -77,6 +77,21 @@ def load_model():
     try:
         from transformers import AutoModelForVision2Seq, AutoProcessor
 
+        # Monkey patch: Handle missing Flash Attention gracefully
+        # The model tries to import LlamaFlashAttention2 which doesn't exist
+        # We patch it to use standard attention instead
+        try:
+            import transformers.models.llama.modeling_llama as llama_module
+            if not hasattr(llama_module, 'LlamaFlashAttention2'):
+                logger.info("Patching missing LlamaFlashAttention2 for CPU compatibility")
+                # Create a dummy class that will never be used
+                # The model will fall back to eager attention
+                class DummyFlashAttention:
+                    pass
+                llama_module.LlamaFlashAttention2 = DummyFlashAttention
+        except Exception as e:
+            logger.warning(f"Could not patch flash attention: {e}")
+
         logger.info(f"Loading model: {MODEL_NAME}")
         logger.info("This may take several minutes on first run (downloading model)...")
 
@@ -104,7 +119,9 @@ def load_model():
             trust_remote_code=True,
             torch_dtype=torch_dtype,
             device_map=device,
-            low_cpu_mem_usage=True  # Optimize for CPU
+            low_cpu_mem_usage=True,  # Optimize for CPU
+            attn_implementation="eager",  # Disable flash attention (CPU compatible)
+            _attn_implementation_internal="eager"  # Force eager attention
         )
 
         model.eval()  # Set to evaluation mode

@@ -32,6 +32,11 @@ services:
       - HF_HOME=/root/.cache/huggingface
       - TRANSFORMERS_CACHE=/root/.cache/huggingface
 
+      # Disable Flash Attention (force CPU-compatible attention)
+      - DISABLE_FLASH_ATTENTION=1
+      - USE_FLASH_ATTENTION=0
+      - PYTORCH_ENABLE_MPS_FALLBACK=1
+
     ports:
       - "8765:8000"
 
