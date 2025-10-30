@@ -75,7 +75,7 @@ def load_model():
     global model, processor, device
 
     try:
-        from transformers import AutoModelForVision2Seq, AutoProcessor
+        from transformers import AutoModel, AutoProcessor
 
         # Monkey patch: Handle missing Flash Attention gracefully
         # The model tries to import LlamaFlashAttention2 which doesn't exist
@@ -114,14 +114,14 @@ def load_model():
 
         # Load model
         logger.info("Loading model weights...")
-        model = AutoModelForVision2Seq.from_pretrained(
+        # DeepSeek-OCR uses a custom model class, must use AutoModel with trust_remote_code
+        model = AutoModel.from_pretrained(
             MODEL_NAME,
             trust_remote_code=True,
             torch_dtype=torch_dtype,
             device_map=device,
             low_cpu_mem_usage=True,  # Optimize for CPU
             attn_implementation="eager",  # Disable flash attention (CPU compatible)
-            _attn_implementation_internal="eager"  # Force eager attention
         )
 
         model.eval()  # Set to evaluation mode
