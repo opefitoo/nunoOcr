@@ -36,7 +36,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Version info (updated with each deployment)
-VERSION = "2.6.0"  # Incremented when code changes
+VERSION = "2.7.0"  # Incremented when code changes
 GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
 BUILD_DATE = datetime.now().isoformat()  # Container start time
 
@@ -477,5 +477,7 @@ if __name__ == "__main__":
         app,
         host=HOST,
         port=PORT,
-        log_level="info"
+        log_level="info",
+        timeout_keep_alive=300,  # Keep connections alive for 5 minutes
+        timeout_graceful_shutdown=30  # Allow 30s for graceful shutdown
     )
