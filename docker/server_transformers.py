@@ -287,24 +287,18 @@ async def chat_completions(request: ChatCompletionRequest):
 
         # Initialize paths for cleanup
         temp_image_path = None
-        temp_output_path = None
+        temp_output_dir = None
 
         try:
-            # Create temp files for input image and output
+            # Create temp file for input image
             tmp_img_fd, temp_image_path = tempfile.mkstemp(suffix='.png', dir='/tmp')
-            tmp_out_fd, temp_output_path = tempfile.mkstemp(suffix='.txt', dir='/tmp')
-            logger.info(f"Created temp image file: {temp_image_path}")
-            logger.info(f"Created temp output file: {temp_output_path}")
-
             os.close(tmp_img_fd)  # Close image file descriptor
-            os.close(tmp_out_fd)  # Close output file descriptor
-
-            # Delete the output file - model.infer() will create it
-            os.unlink(temp_output_path)
-            logger.info(f"Removed temp output file so model.infer() can create it")
-
             image.save(temp_image_path)  # Save PIL image
-            logger.info(f"Saved image to: {temp_image_path}")
+            logger.info(f"Created and saved image to: {temp_image_path}")
+
+            # Create temp directory for output (model.infer() expects a directory)
+            temp_output_dir = tempfile.mkdtemp(dir='/tmp')
+            logger.info(f"Created temp output directory: {temp_output_dir}")
 
             # Use DeepSeek-OCR's custom infer method
             logger.info("Calling model.infer()...")
@@ -312,7 +306,7 @@ async def chat_completions(request: ChatCompletionRequest):
                 tokenizer=processor,
                 prompt=full_prompt,
                 image_file=temp_image_path,
-                output_path=temp_output_path,  # Provide temp output file
+                output_path=temp_output_dir,  # Provide temp output directory
                 save_results=False,  # Don't save results to file
                 eval_mode=False  # Inference mode, not evaluation
             )
@@ -325,9 +319,10 @@ async def chat_completions(request: ChatCompletionRequest):
             if temp_image_path and os.path.exists(temp_image_path):
                 os.unlink(temp_image_path)
                 logger.info(f"Cleaned up temp image: {temp_image_path}")
-            if temp_output_path and os.path.exists(temp_output_path):
-                os.unlink(temp_output_path)
-                logger.info(f"Cleaned up temp output: {temp_output_path}")
+            if temp_output_dir and os.path.exists(temp_output_dir):
+                import shutil
+                shutil.rmtree(temp_output_dir)
+                logger.info(f"Cleaned up temp output dir: {temp_output_dir}")
 
         logger.info(f"✅ OCR completed (output length: {len(generated_text)} chars)")
 
