@@ -37,7 +37,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Version info (updated with each deployment)
-VERSION = "4.0.0"  # CX53 deployment - full model without quantization
+VERSION = "4.0.1"  # Fix DynamicCache.get_usable_length()
 GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
 BUILD_DATE = datetime.now().isoformat()  # Container start time
 
@@ -176,6 +176,21 @@ def load_model():
 
             DynamicCache.get_max_length = get_max_length
             logger.info("✅ DynamicCache.get_max_length() method added")
+
+        # Add missing get_usable_length method
+        if not hasattr(DynamicCache, 'get_usable_length'):
+            def get_usable_length(self, seq_length=None):
+                """Return usable cache length for the current sequence"""
+                # In newer transformers, this is replaced by get_seq_length()
+                if hasattr(self, 'get_seq_length'):
+                    return self.get_seq_length()
+                # Fallback: count from key_cache
+                if self.key_cache and len(self.key_cache) > 0 and self.key_cache[0] is not None:
+                    return self.key_cache[0].shape[2]
+                return 0
+
+            DynamicCache.get_usable_length = get_usable_length
+            logger.info("✅ DynamicCache.get_usable_length() method added")
 
         logger.info(f"Loading model: {MODEL_NAME}")
         logger.info("This may take several minutes on first run (downloading model)...")
