@@ -114,7 +114,7 @@ def test_ocr(service_url, pdf_path=None):
         response = requests.post(
             f"{service_url}/v1/chat/completions",
             json=payload,
-            timeout=120  # 2 minutes timeout
+            timeout=300  # 5 minutes timeout (OCR on CPU is slow)
         )
         response.raise_for_status()
 
