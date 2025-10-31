@@ -36,7 +36,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Version info (updated with each deployment)
-VERSION = "2.1.0"  # Incremented when code changes
+VERSION = "2.2.0"  # Incremented when code changes
 GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
 BUILD_DATE = datetime.now().isoformat()  # Container start time
 
@@ -387,14 +387,19 @@ async def chat_completions(request: ChatCompletionRequest):
 
             # Use patched model.infer() method (now CPU-compatible)
             logger.info("Calling CPU-patched model.infer()...")
-            generated_text = model.infer(
-                tokenizer=processor,
-                prompt=full_prompt,
-                image_file=temp_image_path,
-                output_path=temp_output_dir,
-                save_results=False,
-                eval_mode=False
-            )
+
+            # CRITICAL: Set default dtype to float32 for CPU inference
+            # This ensures all tensors created during inference (including image preprocessing)
+            # are float32, not bfloat16
+            with torch.set_default_dtype(torch.float32):
+                generated_text = model.infer(
+                    tokenizer=processor,
+                    prompt=full_prompt,
+                    image_file=temp_image_path,
+                    output_path=temp_output_dir,
+                    save_results=False,
+                    eval_mode=False
+                )
 
         except Exception as e:
             logger.error(f"Error during inference: {e}")
