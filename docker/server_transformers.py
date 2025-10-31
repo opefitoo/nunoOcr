@@ -75,7 +75,8 @@ def load_model():
     global model, processor, device
 
     try:
-        from transformers import AutoModel, AutoProcessor
+        from transformers import AutoModel, AutoTokenizer
+        import types
 
         # Monkey patch: Handle missing Flash Attention gracefully
         # The model tries to import LlamaFlashAttention2 which doesn't exist
@@ -105,9 +106,9 @@ def load_model():
             torch_dtype = torch.float32
             logger.info("No GPU detected, using CPU (slower but works)")
 
-        # Load processor (handles both image and text)
-        logger.info("Loading processor...")
-        processor = AutoProcessor.from_pretrained(
+        # Load tokenizer
+        logger.info("Loading tokenizer...")
+        processor = AutoTokenizer.from_pretrained(
             MODEL_NAME,
             trust_remote_code=True
         )
@@ -125,6 +126,44 @@ def load_model():
         )
 
         model.eval()  # Set to evaluation mode
+
+        # Monkey patch model.infer() to support CPU by replacing .cuda() calls
+        logger.info("Patching model.infer() to support CPU...")
+        original_infer = model.infer
+
+        def cpu_compatible_infer(self, *args, **kwargs):
+            """Wrapper that patches .cuda() calls to use the actual device"""
+            import types
+
+            # Store original generate method
+            original_generate = self.generate
+
+            def patched_generate(*gen_args, **gen_kwargs):
+                # Recursively move all tensors to the correct device
+                def to_device(obj):
+                    if isinstance(obj, torch.Tensor):
+                        return obj.to(device)
+                    elif isinstance(obj, (list, tuple)):
+                        return type(obj)(to_device(item) for item in obj)
+                    elif isinstance(obj, dict):
+                        return {k: to_device(v) for k, v in obj.items()}
+                    return obj
+
+                gen_args = to_device(gen_args)
+                gen_kwargs = to_device(gen_kwargs)
+                return original_generate(*gen_args, **gen_kwargs)
+
+            # Temporarily replace generate method
+            self.generate = types.MethodType(patched_generate, self)
+            try:
+                result = original_infer(self, *args, **kwargs)
+            finally:
+                self.generate = original_generate
+
+            return result
+
+        model.infer = types.MethodType(cpu_compatible_infer, model)
+        logger.info("✅ model.infer() patched for CPU compatibility")
 
         logger.info(f"✅ Model loaded successfully on {device}")
         logger.info(f"   Model: {MODEL_NAME}")
@@ -281,49 +320,50 @@ async def chat_completions(request: ChatCompletionRequest):
         logger.info(f"Processing OCR request (image size: {image.size})")
         logger.info(f"Prompt: {full_prompt[:100]}...")
 
-        # Prepare inputs using processor
-        logger.info("Preparing inputs with processor...")
+        # Save image temporarily for model.infer()
+        import tempfile
+        import os
+
+        # Initialize paths for cleanup
+        temp_image_path = None
+        temp_output_dir = None
+
         try:
-            # Format text with special tokens for DeepSeek-OCR
-            # The model expects: <image_placeholder> followed by the prompt
-            formatted_text = f"<image_placeholder>{full_prompt}"
+            # Create temp file for input image
+            tmp_img_fd, temp_image_path = tempfile.mkstemp(suffix='.png', dir='/tmp')
+            os.close(tmp_img_fd)
+            image.save(temp_image_path)
+            logger.info(f"Saved image to: {temp_image_path}")
 
-            # Process image and text together
-            inputs = processor(
-                text=formatted_text,
-                images=image,
-                return_tensors="pt"
+            # Create temp directory for output
+            temp_output_dir = tempfile.mkdtemp(dir='/tmp')
+            logger.info(f"Created temp output directory: {temp_output_dir}")
+
+            # Use patched model.infer() method (now CPU-compatible)
+            logger.info("Calling CPU-patched model.infer()...")
+            generated_text = model.infer(
+                tokenizer=processor,
+                prompt=full_prompt,
+                image_file=temp_image_path,
+                output_path=temp_output_dir,
+                save_results=False,
+                eval_mode=False
             )
-
-            # Move all tensor inputs to the correct device
-            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v
-                     for k, v in inputs.items()}
-
-            logger.info(f"Inputs prepared, calling generate on device={device}...")
-
-            # Generate response using model.generate()
-            with torch.no_grad():
-                output_ids = model.generate(
-                    **inputs,
-                    max_new_tokens=request.max_tokens,
-                    do_sample=request.temperature > 0,
-                    temperature=request.temperature if request.temperature > 0 else None,
-                    top_p=request.top_p if request.temperature > 0 else None,
-                )
-
-            # Decode the generated text
-            generated_text = processor.batch_decode(
-                output_ids,
-                skip_special_tokens=True
-            )[0]
-
-            logger.info(f"Raw generated text length: {len(generated_text)}")
 
         except Exception as e:
             logger.error(f"Error during inference: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             raise
+        finally:
+            # Clean up temp files
+            if temp_image_path and os.path.exists(temp_image_path):
+                os.unlink(temp_image_path)
+                logger.info(f"Cleaned up temp image: {temp_image_path}")
+            if temp_output_dir and os.path.exists(temp_output_dir):
+                import shutil
+                shutil.rmtree(temp_output_dir)
+                logger.info(f"Cleaned up temp output dir: {temp_output_dir}")
 
         logger.info(f"✅ OCR completed (output length: {len(generated_text)} chars)")
 
