@@ -41,8 +41,10 @@ RUN pip install --no-cache-dir \
 COPY server_transformers.py /app/server.py
 
 # Health check endpoint
-HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
-    CMD curl -f http://localhost:8000/health || exit 1
+# Disabled temporarily to allow initial model loading (10-15 min)
+# Re-enable after first successful deployment
+# HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
+#     CMD curl -f http://localhost:8000/health || exit 1
 
 # Expose port
 EXPOSE 8000
