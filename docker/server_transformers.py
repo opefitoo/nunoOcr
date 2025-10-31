@@ -37,7 +37,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Version info (updated with each deployment)
-VERSION = "4.1.0"  # Pin transformers==4.46.3 (DeepSeek-OCR tested version)
+VERSION = "4.2.0"  # Fix: Capture stdout output from model.infer()
 GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
 BUILD_DATE = datetime.now().isoformat()  # Container start time
 
@@ -359,6 +359,8 @@ def run_ocr_inference(image: Image.Image, full_prompt: str) -> str:
     """
     import tempfile
     import shutil
+    import sys
+    from io import StringIO
 
     # Initialize paths for cleanup
     temp_image_path = None
@@ -375,18 +377,40 @@ def run_ocr_inference(image: Image.Image, full_prompt: str) -> str:
         temp_output_dir = tempfile.mkdtemp(dir='/tmp')
         logger.info(f"Created temp output directory: {temp_output_dir}")
 
-        # Use patched model.infer() method (now CPU-compatible)
+        # Capture stdout since model.infer() prints but doesn't return the text
         logger.info("Calling CPU-patched model.infer()...")
-        generated_text = model.infer(
-            tokenizer=processor,
-            prompt=full_prompt,
-            image_file=temp_image_path,
-            output_path=temp_output_dir,
-            save_results=False,
-            eval_mode=False
-        )
+        captured_output = StringIO()
+        original_stdout = sys.stdout
 
-        logger.info(f"✅ OCR completed (output length: {len(generated_text)} chars)")
+        try:
+            # Redirect stdout to capture printed output
+            sys.stdout = captured_output
+
+            generated_text = model.infer(
+                tokenizer=processor,
+                prompt=full_prompt,
+                image_file=temp_image_path,
+                output_path=temp_output_dir,
+                save_results=False,
+                eval_mode=False
+            )
+        finally:
+            # Restore original stdout
+            sys.stdout = original_stdout
+
+        # Get captured text
+        captured_text = captured_output.getvalue()
+
+        # Use captured stdout if model.infer() returned None
+        if generated_text is None or not generated_text.strip():
+            generated_text = captured_text.strip()
+            logger.info(f"✅ OCR completed - captured from stdout (length: {len(generated_text)} chars)")
+        else:
+            logger.info(f"✅ OCR completed - returned by model (length: {len(generated_text)} chars)")
+
+        if not generated_text:
+            raise ValueError("No OCR output generated - both return value and stdout are empty")
+
         return generated_text
 
     except Exception as e:
