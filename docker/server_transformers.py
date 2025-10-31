@@ -156,7 +156,8 @@ def load_model():
             # Temporarily replace generate method
             self.generate = types.MethodType(patched_generate, self)
             try:
-                result = original_infer(self, *args, **kwargs)
+                # Don't pass self - original_infer is already bound
+                result = original_infer(*args, **kwargs)
             finally:
                 self.generate = original_generate
 
