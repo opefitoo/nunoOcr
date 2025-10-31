@@ -46,12 +46,14 @@ services:
       # Optional: logs
       - ./logs:/app/logs
 
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 180s  # Give extra time for model download + loading
+    # Healthcheck disabled temporarily to allow initial model loading (10-15 min)
+    # Re-enable after first successful deployment
+    # healthcheck:
+    #   test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 5
+    #   start_period: 180s  # Give extra time for model download + loading
 
     # Resource limits (CPU-optimized)
     # Adjust based on your server capacity
