@@ -286,21 +286,30 @@ async def chat_completions(request: ChatCompletionRequest):
         import os
 
         # Create temp file and save image
-        tmp_fd, temp_image_path = tempfile.mkstemp(suffix='.png')
+        tmp_fd, temp_image_path = tempfile.mkstemp(suffix='.png', dir='/tmp')
+        logger.info(f"Created temp file: {temp_image_path}")
+
         try:
             os.close(tmp_fd)  # Close file descriptor
             image.save(temp_image_path)  # Save PIL image
+            logger.info(f"Saved image to: {temp_image_path}")
 
             # Use DeepSeek-OCR's custom infer method
+            logger.info("Calling model.infer()...")
             generated_text = model.infer(
                 tokenizer=processor,
                 prompt=full_prompt,
                 image_file=temp_image_path
             )
+        except Exception as e:
+            logger.error(f"Error during inference: {e}")
+            logger.error(f"Temp image path was: {temp_image_path}")
+            raise
         finally:
             # Clean up temp file
-            if os.path.exists(temp_image_path):
+            if temp_image_path and os.path.exists(temp_image_path):
                 os.unlink(temp_image_path)
+                logger.info(f"Cleaned up temp file: {temp_image_path}")
 
         logger.info(f"✅ OCR completed (output length: {len(generated_text)} chars)")
 
