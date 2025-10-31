@@ -37,7 +37,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Version info (updated with each deployment)
-VERSION = "3.0.0"  # 8-bit quantization: memory reduced from 15GB → 8GB
+VERSION = "3.0.1"  # 8-bit quantization dtype fix
 GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
 BUILD_DATE = datetime.now().isoformat()  # Container start time
 
@@ -114,39 +114,6 @@ def load_model():
 
         torch.Tensor.cuda = cpu_compatible_cuda
         logger.info("✅ torch.Tensor.cuda() globally patched")
-
-        # Patch .bfloat16() calls for CPU compatibility (CPU doesn't support bfloat16 well)
-        logger.info("Patching torch.Tensor.bfloat16() for CPU compatibility...")
-        original_bfloat16 = torch.Tensor.bfloat16
-
-        def cpu_compatible_bfloat16(self):
-            """Convert bfloat16() to float32() on CPU for compatibility"""
-            if not torch.cuda.is_available():
-                # On CPU, use float32 instead of bfloat16
-                return self.float()
-            # On GPU, use original bfloat16
-            return original_bfloat16(self)
-
-        torch.Tensor.bfloat16 = cpu_compatible_bfloat16
-        logger.info("✅ torch.Tensor.bfloat16() patched to use float32 on CPU")
-
-        # Patch .to() method to prevent bfloat16 conversion on CPU
-        logger.info("Patching torch.Tensor.to() to prevent bfloat16 on CPU...")
-        original_to = torch.Tensor.to
-
-        def cpu_compatible_to(self, *args, **kwargs):
-            """Intercept .to() calls and replace bfloat16 with float32 on CPU"""
-            if not torch.cuda.is_available():
-                # Check if trying to convert to bfloat16
-                if args and args[0] == torch.bfloat16:
-                    # Replace with float32
-                    args = (torch.float32,) + args[1:]
-                elif 'dtype' in kwargs and kwargs['dtype'] == torch.bfloat16:
-                    kwargs['dtype'] = torch.float32
-            return original_to(self, *args, **kwargs)
-
-        torch.Tensor.to = cpu_compatible_to
-        logger.info("✅ torch.Tensor.to() patched to prevent bfloat16 on CPU")
 
         # Fix transformers version incompatibility: DynamicCache API changes
         logger.info("Patching DynamicCache for API compatibility...")
