@@ -35,6 +35,11 @@ MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-OCR")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
+# Version info (updated with each deployment)
+VERSION = "2.1.0"  # Incremented when code changes
+GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
+BUILD_DATE = datetime.now().isoformat()  # Container start time
+
 # Initialize FastAPI app
 app = FastAPI(
     title="DeepSeek-OCR API",
@@ -223,7 +228,9 @@ async def root():
     """Root endpoint."""
     return {
         "service": "DeepSeek-OCR API",
-        "version": "2.0.0",
+        "version": VERSION,
+        "git_commit": GIT_COMMIT,
+        "build_date": BUILD_DATE,
         "status": "ok" if model is not None else "initializing",
         "engine": "transformers",
         "device": device if device else "unknown"
@@ -237,14 +244,20 @@ async def health_check():
         return {
             "status": "initializing",
             "model": MODEL_NAME,
-            "device": "loading"
+            "device": "loading",
+            "version": VERSION,
+            "git_commit": GIT_COMMIT,
+            "build_date": BUILD_DATE
         }
 
     return {
         "status": "ok",
         "model": MODEL_NAME,
         "device": device,
-        "engine": "transformers"
+        "engine": "transformers",
+        "version": VERSION,
+        "git_commit": GIT_COMMIT,
+        "build_date": BUILD_DATE
     }
 
 

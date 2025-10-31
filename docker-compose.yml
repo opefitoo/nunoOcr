@@ -23,6 +23,9 @@ services:
       - PORT=8000
       - API_KEY=${API_KEY:-}
 
+      # Version tracking
+      - GIT_COMMIT=${GIT_COMMIT:-unknown}
+
       # PyTorch CPU optimizations
       - OMP_NUM_THREADS=4
       - MKL_NUM_THREADS=4
