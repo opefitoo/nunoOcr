@@ -37,7 +37,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Version info (updated with each deployment)
-VERSION = "4.0.1"  # Fix DynamicCache.get_usable_length()
+VERSION = "4.1.0"  # Pin transformers==4.46.3 (DeepSeek-OCR tested version)
 GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
 BUILD_DATE = datetime.now().isoformat()  # Container start time
 

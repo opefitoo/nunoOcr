@@ -17,9 +17,10 @@ RUN apt-get update && apt-get install -y \
 RUN pip install --no-cache-dir --upgrade pip
 
 # Install transformers and dependencies (without vLLM)
-# Note: DeepSeek-OCR has many undocumented dependencies
+# DeepSeek-OCR officially tested with transformers==4.46.3
+# DO NOT upgrade - newer versions have breaking API changes
 RUN pip install --no-cache-dir \
-    "transformers>=4.45.0" \
+    "transformers==4.46.3" \
     "torch>=2.0.0" \
     "torchvision>=0.15.0" \
     "accelerate>=0.25.0" \
