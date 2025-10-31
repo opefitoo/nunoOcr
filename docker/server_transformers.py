@@ -109,12 +109,12 @@ def load_model():
         torch.Tensor.cuda = cpu_compatible_cuda
         logger.info("✅ torch.Tensor.cuda() globally patched")
 
-        # Fix transformers version incompatibility: DynamicCache.seen_tokens
+        # Fix transformers version incompatibility: DynamicCache API changes
         logger.info("Patching DynamicCache for API compatibility...")
         from transformers.cache_utils import DynamicCache
 
+        # Add missing seen_tokens property
         if not hasattr(DynamicCache, 'seen_tokens'):
-            # Add seen_tokens property for backward compatibility
             @property
             def seen_tokens(self):
                 """Compatibility property for older model code"""
@@ -127,6 +127,16 @@ def load_model():
 
             DynamicCache.seen_tokens = seen_tokens
             logger.info("✅ DynamicCache.seen_tokens property added")
+
+        # Add missing get_max_length method
+        if not hasattr(DynamicCache, 'get_max_length'):
+            def get_max_length(self):
+                """Return maximum cache length (None means unlimited)"""
+                # DynamicCache has no max length limit by default
+                return None
+
+            DynamicCache.get_max_length = get_max_length
+            logger.info("✅ DynamicCache.get_max_length() method added")
 
         logger.info(f"Loading model: {MODEL_NAME}")
         logger.info("This may take several minutes on first run (downloading model)...")
