@@ -37,7 +37,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Version info (updated with each deployment)
-VERSION = "3.0.1"  # 8-bit quantization dtype fix
+VERSION = "4.0.0"  # CX53 deployment - full model without quantization
 GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
 BUILD_DATE = datetime.now().isoformat()  # Container start time
 
@@ -115,6 +115,39 @@ def load_model():
         torch.Tensor.cuda = cpu_compatible_cuda
         logger.info("✅ torch.Tensor.cuda() globally patched")
 
+        # Patch .bfloat16() calls for CPU compatibility (CPU doesn't support bfloat16 well)
+        logger.info("Patching torch.Tensor.bfloat16() for CPU compatibility...")
+        original_bfloat16 = torch.Tensor.bfloat16
+
+        def cpu_compatible_bfloat16(self):
+            """Convert bfloat16() to float32() on CPU for compatibility"""
+            if not torch.cuda.is_available():
+                # On CPU, use float32 instead of bfloat16
+                return self.float()
+            # On GPU, use original bfloat16
+            return original_bfloat16(self)
+
+        torch.Tensor.bfloat16 = cpu_compatible_bfloat16
+        logger.info("✅ torch.Tensor.bfloat16() patched to use float32 on CPU")
+
+        # Patch .to() method to prevent bfloat16 conversion on CPU
+        logger.info("Patching torch.Tensor.to() to prevent bfloat16 on CPU...")
+        original_to = torch.Tensor.to
+
+        def cpu_compatible_to(self, *args, **kwargs):
+            """Intercept .to() calls and replace bfloat16 with float32 on CPU"""
+            if not torch.cuda.is_available():
+                # Check if trying to convert to bfloat16
+                if args and args[0] == torch.bfloat16:
+                    # Replace with float32
+                    args = (torch.float32,) + args[1:]
+                elif 'dtype' in kwargs and kwargs['dtype'] == torch.bfloat16:
+                    kwargs['dtype'] = torch.float32
+            return original_to(self, *args, **kwargs)
+
+        torch.Tensor.to = cpu_compatible_to
+        logger.info("✅ torch.Tensor.to() patched to prevent bfloat16 on CPU")
+
         # Fix transformers version incompatibility: DynamicCache API changes
         logger.info("Patching DynamicCache for API compatibility...")
         from transformers.cache_utils import DynamicCache
@@ -150,13 +183,12 @@ def load_model():
         # Detect device (CPU or GPU if available)
         if torch.cuda.is_available():
             device = "cuda"
-            use_quantization = False
-            logger.info("GPU detected, using CUDA with float16")
+            torch_dtype = torch.float16
+            logger.info("GPU detected, using CUDA")
         else:
             device = "cpu"
-            use_quantization = True
-            logger.info("No GPU detected, using CPU with 8-bit quantization")
-            logger.info("8-bit quantization reduces memory from ~15GB to ~8GB")
+            torch_dtype = torch.float32
+            logger.info("No GPU detected, using CPU (CX53 32GB server)")
 
         # Load tokenizer
         logger.info("Loading tokenizer...")
@@ -165,34 +197,40 @@ def load_model():
             trust_remote_code=True
         )
 
-        # Load model with 8-bit quantization on CPU
+        # Load model
         logger.info("Loading model weights...")
-        if use_quantization:
-            logger.info("Applying 8-bit quantization for CPU memory optimization...")
-            model = AutoModel.from_pretrained(
-                MODEL_NAME,
-                trust_remote_code=True,
-                load_in_8bit=True,  # 8-bit quantization: ~15GB → ~8GB
-                device_map="auto",  # Auto device mapping for quantized models
-                low_cpu_mem_usage=True,
-                attn_implementation="eager",  # Disable flash attention (CPU compatible)
-            )
-        else:
-            # GPU: use float16 without quantization
-            model = AutoModel.from_pretrained(
-                MODEL_NAME,
-                trust_remote_code=True,
-                torch_dtype=torch.float16,
-                device_map="cuda",
-                attn_implementation="eager",
-            )
+        model = AutoModel.from_pretrained(
+            MODEL_NAME,
+            trust_remote_code=True,
+            torch_dtype=torch_dtype,
+            device_map=device,
+            low_cpu_mem_usage=True,  # Optimize for CPU
+            attn_implementation="eager",  # Disable flash attention (CPU compatible)
+        )
 
         model.eval()  # Set to evaluation mode
+
+        # CRITICAL: Force all model parameters and buffers to float32 on CPU
+        # Some layers may still be in bfloat16 causing dtype mismatches
+        if device == "cpu":
+            logger.info("Converting all model parameters to float32 for CPU compatibility...")
+            model = model.float()
+            # Also ensure all buffers are float32
+            for name, buffer in model.named_buffers():
+                if buffer.dtype == torch.bfloat16:
+                    buffer.data = buffer.data.float()
+            logger.info("✅ All model weights converted to float32")
+
+            # Set global default dtype to float32 for CPU
+            logger.info("Setting global default dtype to float32 for CPU...")
+            torch.set_default_dtype(torch.float32)
+            logger.info("✅ Global default dtype set to float32")
 
         logger.info(f"✅ Model loaded successfully on {device}")
         logger.info(f"   Model: {MODEL_NAME}")
         logger.info(f"   Device: {device}")
-        logger.info(f"   Quantization: {'8-bit' if use_quantization else 'None (float16)'}")
+        logger.info(f"   Dtype: {torch_dtype}")
+        logger.info(f"   Server: CX53 (32GB RAM)")
 
         return True
 
