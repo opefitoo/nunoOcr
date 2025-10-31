@@ -75,7 +75,7 @@ def load_model():
     global model, processor, device
 
     try:
-        from transformers import AutoModel, AutoTokenizer
+        from transformers import AutoModel, AutoProcessor
 
         # Monkey patch: Handle missing Flash Attention gracefully
         # The model tries to import LlamaFlashAttention2 which doesn't exist
@@ -105,9 +105,9 @@ def load_model():
             torch_dtype = torch.float32
             logger.info("No GPU detected, using CPU (slower but works)")
 
-        # Load tokenizer
-        logger.info("Loading tokenizer...")
-        processor = AutoTokenizer.from_pretrained(
+        # Load processor (handles both image and text)
+        logger.info("Loading processor...")
+        processor = AutoProcessor.from_pretrained(
             MODEL_NAME,
             trust_remote_code=True
         )
@@ -281,48 +281,60 @@ async def chat_completions(request: ChatCompletionRequest):
         logger.info(f"Processing OCR request (image size: {image.size})")
         logger.info(f"Prompt: {full_prompt[:100]}...")
 
-        # Save image temporarily for model.infer()
-        import tempfile
-        import os
+        # Prepare conversation format expected by DeepSeek-OCR
+        conversation = [
+            {
+                "role": "User",
+                "content": f"<image_placeholder>\n{full_prompt}",
+                "images": [image]
+            },
+            {"role": "Assistant", "content": ""}
+        ]
 
-        # Initialize paths for cleanup
-        temp_image_path = None
-        temp_output_dir = None
-
+        # Prepare inputs using processor
+        logger.info("Preparing inputs with processor...")
         try:
-            # Create temp file for input image
-            tmp_img_fd, temp_image_path = tempfile.mkstemp(suffix='.png', dir='/tmp')
-            os.close(tmp_img_fd)  # Close image file descriptor
-            image.save(temp_image_path)  # Save PIL image
-            logger.info(f"Created and saved image to: {temp_image_path}")
-
-            # Create temp directory for output (model.infer() expects a directory)
-            temp_output_dir = tempfile.mkdtemp(dir='/tmp')
-            logger.info(f"Created temp output directory: {temp_output_dir}")
-
-            # Use DeepSeek-OCR's custom infer method
-            logger.info("Calling model.infer()...")
-            generated_text = model.infer(
-                tokenizer=processor,
-                prompt=full_prompt,
-                image_file=temp_image_path,
-                output_path=temp_output_dir,  # Provide temp output directory
-                save_results=False,  # Don't save results to file
-                eval_mode=False  # Inference mode, not evaluation
+            # Apply chat template to get text prompt
+            text = processor.apply_chat_template(
+                conversation,
+                tokenize=False,
+                add_generation_prompt=True
             )
+
+            # Process image and text together
+            inputs = processor(
+                text=[text],
+                images=[image],
+                return_tensors="pt"
+            )
+
+            # Move all tensor inputs to the correct device
+            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v
+                     for k, v in inputs.items()}
+
+            logger.info(f"Inputs prepared, calling generate on device={device}...")
+
+            # Generate response using model.generate()
+            with torch.no_grad():
+                output_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=request.max_tokens,
+                    do_sample=request.temperature > 0,
+                    temperature=request.temperature if request.temperature > 0 else None,
+                    top_p=request.top_p if request.temperature > 0 else None,
+                )
+
+            # Decode the generated text
+            generated_text = processor.batch_decode(
+                output_ids,
+                skip_special_tokens=True
+            )[0]
+
         except Exception as e:
             logger.error(f"Error during inference: {e}")
-            logger.error(f"Temp image path was: {temp_image_path}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             raise
-        finally:
-            # Clean up temp files
-            if temp_image_path and os.path.exists(temp_image_path):
-                os.unlink(temp_image_path)
-                logger.info(f"Cleaned up temp image: {temp_image_path}")
-            if temp_output_dir and os.path.exists(temp_output_dir):
-                import shutil
-                shutil.rmtree(temp_output_dir)
-                logger.info(f"Cleaned up temp output dir: {temp_output_dir}")
 
         logger.info(f"✅ OCR completed (output length: {len(generated_text)} chars)")
 
