@@ -36,7 +36,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Version info (updated with each deployment)
-VERSION = "2.3.0"  # Incremented when code changes
+VERSION = "2.4.0"  # Incremented when code changes
 GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
 BUILD_DATE = datetime.now().isoformat()  # Container start time
 
@@ -128,6 +128,24 @@ def load_model():
 
         torch.Tensor.bfloat16 = cpu_compatible_bfloat16
         logger.info("✅ torch.Tensor.bfloat16() patched to use float32 on CPU")
+
+        # Patch .to() method to prevent bfloat16 conversion on CPU
+        logger.info("Patching torch.Tensor.to() to prevent bfloat16 on CPU...")
+        original_to = torch.Tensor.to
+
+        def cpu_compatible_to(self, *args, **kwargs):
+            """Intercept .to() calls and replace bfloat16 with float32 on CPU"""
+            if not torch.cuda.is_available():
+                # Check if trying to convert to bfloat16
+                if args and args[0] == torch.bfloat16:
+                    # Replace with float32
+                    args = (torch.float32,) + args[1:]
+                elif 'dtype' in kwargs and kwargs['dtype'] == torch.bfloat16:
+                    kwargs['dtype'] = torch.float32
+            return original_to(self, *args, **kwargs)
+
+        torch.Tensor.to = cpu_compatible_to
+        logger.info("✅ torch.Tensor.to() patched to prevent bfloat16 on CPU")
 
         # Fix transformers version incompatibility: DynamicCache API changes
         logger.info("Patching DynamicCache for API compatibility...")
