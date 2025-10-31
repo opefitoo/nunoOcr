@@ -109,6 +109,21 @@ def load_model():
         torch.Tensor.cuda = cpu_compatible_cuda
         logger.info("✅ torch.Tensor.cuda() globally patched")
 
+        # Patch .bfloat16() calls for CPU compatibility (CPU doesn't support bfloat16 well)
+        logger.info("Patching torch.Tensor.bfloat16() for CPU compatibility...")
+        original_bfloat16 = torch.Tensor.bfloat16
+
+        def cpu_compatible_bfloat16(self):
+            """Convert bfloat16() to float32() on CPU for compatibility"""
+            if not torch.cuda.is_available():
+                # On CPU, use float32 instead of bfloat16
+                return self.float()
+            # On GPU, use original bfloat16
+            return original_bfloat16(self)
+
+        torch.Tensor.bfloat16 = cpu_compatible_bfloat16
+        logger.info("✅ torch.Tensor.bfloat16() patched to use float32 on CPU")
+
         # Fix transformers version incompatibility: DynamicCache API changes
         logger.info("Patching DynamicCache for API compatibility...")
         from transformers.cache_utils import DynamicCache
