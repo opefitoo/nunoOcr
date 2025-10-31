@@ -187,6 +187,17 @@ def load_model():
 
         model.eval()  # Set to evaluation mode
 
+        # CRITICAL: Force all model parameters and buffers to float32 on CPU
+        # Some layers may still be in bfloat16 causing dtype mismatches
+        if device == "cpu":
+            logger.info("Converting all model parameters to float32 for CPU compatibility...")
+            model = model.float()
+            # Also ensure all buffers are float32
+            for name, buffer in model.named_buffers():
+                if buffer.dtype == torch.bfloat16:
+                    buffer.data = buffer.data.float()
+            logger.info("✅ All model weights converted to float32")
+
         logger.info(f"✅ Model loaded successfully on {device}")
         logger.info(f"   Model: {MODEL_NAME}")
         logger.info(f"   Device: {device}")
