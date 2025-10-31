@@ -60,9 +60,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 12G  # Max 12GB RAM
+          memory: 14G  # Max 14GB RAM (CX43 has 16GB total)
         reservations:
-          memory: 8G   # Reserve 8GB RAM
+          memory: 10G  # Reserve 10GB RAM
 
     shm_size: '2gb'
 
