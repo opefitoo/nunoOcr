@@ -282,9 +282,10 @@ async def chat_completions(request: ChatCompletionRequest):
         logger.info(f"Prompt: {full_prompt[:100]}...")
 
         # Prepare inputs
+        # DeepSeek-OCR processor expects image and text as separate args
         inputs = processor(
-            images=image,
-            text=full_prompt,
+            image,
+            full_prompt,
             return_tensors="pt"
         ).to(device)
 
