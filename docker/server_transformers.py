@@ -281,30 +281,17 @@ async def chat_completions(request: ChatCompletionRequest):
         logger.info(f"Processing OCR request (image size: {image.size})")
         logger.info(f"Prompt: {full_prompt[:100]}...")
 
-        # Prepare conversation format expected by DeepSeek-OCR
-        conversation = [
-            {
-                "role": "User",
-                "content": f"<image_placeholder>\n{full_prompt}",
-                "images": [image]
-            },
-            {"role": "Assistant", "content": ""}
-        ]
-
         # Prepare inputs using processor
         logger.info("Preparing inputs with processor...")
         try:
-            # Apply chat template to get text prompt
-            text = processor.apply_chat_template(
-                conversation,
-                tokenize=False,
-                add_generation_prompt=True
-            )
+            # Format text with special tokens for DeepSeek-OCR
+            # The model expects: <image_placeholder> followed by the prompt
+            formatted_text = f"<image_placeholder>{full_prompt}"
 
             # Process image and text together
             inputs = processor(
-                text=[text],
-                images=[image],
+                text=formatted_text,
+                images=image,
                 return_tensors="pt"
             )
 
@@ -329,6 +316,8 @@ async def chat_completions(request: ChatCompletionRequest):
                 output_ids,
                 skip_special_tokens=True
             )[0]
+
+            logger.info(f"Raw generated text length: {len(generated_text)}")
 
         except Exception as e:
             logger.error(f"Error during inference: {e}")
