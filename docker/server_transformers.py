@@ -75,7 +75,7 @@ def load_model():
     global model, processor, device
 
     try:
-        from transformers import AutoModel, AutoProcessor
+        from transformers import AutoModel, AutoTokenizer
 
         # Monkey patch: Handle missing Flash Attention gracefully
         # The model tries to import LlamaFlashAttention2 which doesn't exist
@@ -105,9 +105,9 @@ def load_model():
             torch_dtype = torch.float32
             logger.info("No GPU detected, using CPU (slower but works)")
 
-        # Load processor
-        logger.info("Loading processor...")
-        processor = AutoProcessor.from_pretrained(
+        # Load tokenizer
+        logger.info("Loading tokenizer...")
+        processor = AutoTokenizer.from_pretrained(
             MODEL_NAME,
             trust_remote_code=True
         )
@@ -281,32 +281,24 @@ async def chat_completions(request: ChatCompletionRequest):
         logger.info(f"Processing OCR request (image size: {image.size})")
         logger.info(f"Prompt: {full_prompt[:100]}...")
 
-        # Prepare inputs
-        # DeepSeek-OCR processor expects text first, then images
-        inputs = processor(
-            text=full_prompt,
-            images=image,
-            return_tensors="pt"
-        )
+        # Save image temporarily for model.infer()
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
+            image.save(tmp_file.name)
+            temp_image_path = tmp_file.name
 
-        # Move inputs to device
-        inputs = {k: v.to(device) if torch.is_tensor(v) else v for k, v in inputs.items()}
-
-        # Generate response
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=request.max_tokens,
-                do_sample=request.temperature > 0,
-                temperature=request.temperature if request.temperature > 0 else None,
-                top_p=request.top_p if request.temperature > 0 else None,
+        try:
+            # Use DeepSeek-OCR's custom infer method
+            generated_text = model.infer(
+                tokenizer=processor,
+                prompt=full_prompt,
+                image_file=temp_image_path
             )
-
-        # Decode response
-        generated_text = processor.batch_decode(
-            outputs,
-            skip_special_tokens=True
-        )[0]
+        finally:
+            # Clean up temp file
+            import os
+            if os.path.exists(temp_image_path):
+                os.unlink(temp_image_path)
 
         logger.info(f"✅ OCR completed (output length: {len(generated_text)} chars)")
 
