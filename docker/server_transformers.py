@@ -285,12 +285,18 @@ async def chat_completions(request: ChatCompletionRequest):
         import tempfile
         import os
 
-        # Create temp file and save image
-        tmp_fd, temp_image_path = tempfile.mkstemp(suffix='.png', dir='/tmp')
-        logger.info(f"Created temp file: {temp_image_path}")
+        # Initialize paths for cleanup
+        temp_image_path = None
+        temp_output_path = None
 
         try:
-            os.close(tmp_fd)  # Close file descriptor
+            # Create temp files for input image and output
+            tmp_img_fd, temp_image_path = tempfile.mkstemp(suffix='.png', dir='/tmp')
+            tmp_out_fd, temp_output_path = tempfile.mkstemp(suffix='.txt', dir='/tmp')
+            logger.info(f"Created temp image file: {temp_image_path}")
+            logger.info(f"Created temp output file: {temp_output_path}")
+            os.close(tmp_img_fd)  # Close image file descriptor
+            os.close(tmp_out_fd)  # Close output file descriptor
             image.save(temp_image_path)  # Save PIL image
             logger.info(f"Saved image to: {temp_image_path}")
 
@@ -299,17 +305,23 @@ async def chat_completions(request: ChatCompletionRequest):
             generated_text = model.infer(
                 tokenizer=processor,
                 prompt=full_prompt,
-                image_file=temp_image_path
+                image_file=temp_image_path,
+                output_path=temp_output_path,  # Provide temp output file
+                save_results=False,  # Don't save results to file
+                eval_mode=False  # Inference mode, not evaluation
             )
         except Exception as e:
             logger.error(f"Error during inference: {e}")
             logger.error(f"Temp image path was: {temp_image_path}")
             raise
         finally:
-            # Clean up temp file
+            # Clean up temp files
             if temp_image_path and os.path.exists(temp_image_path):
                 os.unlink(temp_image_path)
-                logger.info(f"Cleaned up temp file: {temp_image_path}")
+                logger.info(f"Cleaned up temp image: {temp_image_path}")
+            if temp_output_path and os.path.exists(temp_output_path):
+                os.unlink(temp_output_path)
+                logger.info(f"Cleaned up temp output: {temp_output_path}")
 
         logger.info(f"✅ OCR completed (output length: {len(generated_text)} chars)")
 
