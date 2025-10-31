@@ -93,6 +93,22 @@ def load_model():
         except Exception as e:
             logger.warning(f"Could not patch flash attention: {e}")
 
+        # CRITICAL: Globally monkey-patch torch.Tensor.cuda() for CPU compatibility
+        # DeepSeek-OCR's infer() has hardcoded .cuda() calls that fail on CPU
+        logger.info("Globally patching torch.Tensor.cuda() for CPU compatibility...")
+        original_cuda = torch.Tensor.cuda
+
+        def cpu_compatible_cuda(self, device_arg=None, **kwargs):
+            """Redirect .cuda() calls to .cpu() when CUDA is unavailable"""
+            if not torch.cuda.is_available():
+                # On CPU-only systems, return tensor as-is (already on CPU)
+                return self
+            # On systems with CUDA, use original behavior
+            return original_cuda(self, device_arg, **kwargs)
+
+        torch.Tensor.cuda = cpu_compatible_cuda
+        logger.info("✅ torch.Tensor.cuda() globally patched")
+
         logger.info(f"Loading model: {MODEL_NAME}")
         logger.info("This may take several minutes on first run (downloading model)...")
 
@@ -126,45 +142,6 @@ def load_model():
         )
 
         model.eval()  # Set to evaluation mode
-
-        # Monkey patch model.infer() to support CPU by replacing .cuda() calls
-        logger.info("Patching model.infer() to support CPU...")
-        original_infer = model.infer
-
-        def cpu_compatible_infer(self, *args, **kwargs):
-            """Wrapper that patches .cuda() calls to use the actual device"""
-            import types
-
-            # Store original generate method
-            original_generate = self.generate
-
-            def patched_generate(*gen_args, **gen_kwargs):
-                # Recursively move all tensors to the correct device
-                def to_device(obj):
-                    if isinstance(obj, torch.Tensor):
-                        return obj.to(device)
-                    elif isinstance(obj, (list, tuple)):
-                        return type(obj)(to_device(item) for item in obj)
-                    elif isinstance(obj, dict):
-                        return {k: to_device(v) for k, v in obj.items()}
-                    return obj
-
-                gen_args = to_device(gen_args)
-                gen_kwargs = to_device(gen_kwargs)
-                return original_generate(*gen_args, **gen_kwargs)
-
-            # Temporarily replace generate method
-            self.generate = types.MethodType(patched_generate, self)
-            try:
-                # Don't pass self - original_infer is already bound
-                result = original_infer(*args, **kwargs)
-            finally:
-                self.generate = original_generate
-
-            return result
-
-        model.infer = types.MethodType(cpu_compatible_infer, model)
-        logger.info("✅ model.infer() patched for CPU compatibility")
 
         logger.info(f"✅ Model loaded successfully on {device}")
         logger.info(f"   Model: {MODEL_NAME}")
