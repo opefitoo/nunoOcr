@@ -6,6 +6,14 @@ services:
     container_name: nunoocr_deepseek
     restart: unless-stopped
 
+    # Traefik labels for timeout configuration
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.nunoocr.loadbalancer.server.timeout=300s"
+      - "traefik.http.routers.nunoocr.timeout.idle=300s"
+      - "traefik.http.routers.nunoocr.timeout.read=300s"
+      - "traefik.http.routers.nunoocr.timeout.write=300s"
+
     # Uncomment for NVIDIA GPU support
     # deploy:
     #   resources:

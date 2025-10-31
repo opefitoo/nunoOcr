@@ -36,7 +36,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Version info (updated with each deployment)
-VERSION = "2.4.0"  # Incremented when code changes
+VERSION = "2.5.0"  # Incremented when code changes
 GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
 BUILD_DATE = datetime.now().isoformat()  # Container start time
 
