@@ -282,12 +282,15 @@ async def chat_completions(request: ChatCompletionRequest):
         logger.info(f"Prompt: {full_prompt[:100]}...")
 
         # Prepare inputs
-        # DeepSeek-OCR processor expects image and text as separate args
+        # DeepSeek-OCR processor expects text first, then images
         inputs = processor(
-            image,
-            full_prompt,
+            text=full_prompt,
+            images=image,
             return_tensors="pt"
-        ).to(device)
+        )
+
+        # Move inputs to device
+        inputs = {k: v.to(device) if torch.is_tensor(v) else v for k, v in inputs.items()}
 
         # Generate response
         with torch.no_grad():
