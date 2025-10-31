@@ -37,7 +37,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Version info (updated with each deployment)
-VERSION = "2.8.0"  # Async processing to prevent container restarts
+VERSION = "2.9.0"  # Increased memory limit to 15.5G (OOM fix)
 GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
 BUILD_DATE = datetime.now().isoformat()  # Container start time
 
