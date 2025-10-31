@@ -58,14 +58,14 @@ services:
     #   retries: 5
     #   start_period: 180s  # Give extra time for model download + loading
 
-    # Resource limits (CPU-optimized)
-    # Adjust based on your server capacity
+    # Resource limits (CPU-optimized with 8-bit quantization)
+    # 8-bit quantization reduces memory from ~15GB to ~8GB
     deploy:
       resources:
         limits:
-          memory: 15.5G  # Max 15.5GB RAM (CX43 has 16GB total, leaving 500MB for OS)
+          memory: 12G  # Generous limit for 8-bit model (~8GB + 4GB headroom)
         reservations:
-          memory: 10G  # Reserve 10GB RAM
+          memory: 8G  # Reserve 8GB RAM
 
     shm_size: '2gb'
 

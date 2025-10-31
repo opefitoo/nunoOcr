@@ -37,7 +37,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Version info (updated with each deployment)
-VERSION = "2.9.0"  # Increased memory limit to 15.5G (OOM fix)
+VERSION = "3.0.0"  # 8-bit quantization: memory reduced from 15GB → 8GB
 GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
 BUILD_DATE = datetime.now().isoformat()  # Container start time
 
@@ -183,12 +183,13 @@ def load_model():
         # Detect device (CPU or GPU if available)
         if torch.cuda.is_available():
             device = "cuda"
-            torch_dtype = torch.float16
-            logger.info("GPU detected, using CUDA")
+            use_quantization = False
+            logger.info("GPU detected, using CUDA with float16")
         else:
             device = "cpu"
-            torch_dtype = torch.float32
-            logger.info("No GPU detected, using CPU (slower but works)")
+            use_quantization = True
+            logger.info("No GPU detected, using CPU with 8-bit quantization")
+            logger.info("8-bit quantization reduces memory from ~15GB to ~8GB")
 
         # Load tokenizer
         logger.info("Loading tokenizer...")
@@ -197,41 +198,34 @@ def load_model():
             trust_remote_code=True
         )
 
-        # Load model
+        # Load model with 8-bit quantization on CPU
         logger.info("Loading model weights...")
-        # DeepSeek-OCR uses a custom model class, must use AutoModel with trust_remote_code
-        model = AutoModel.from_pretrained(
-            MODEL_NAME,
-            trust_remote_code=True,
-            torch_dtype=torch_dtype,
-            device_map=device,
-            low_cpu_mem_usage=True,  # Optimize for CPU
-            attn_implementation="eager",  # Disable flash attention (CPU compatible)
-        )
+        if use_quantization:
+            logger.info("Applying 8-bit quantization for CPU memory optimization...")
+            model = AutoModel.from_pretrained(
+                MODEL_NAME,
+                trust_remote_code=True,
+                load_in_8bit=True,  # 8-bit quantization: ~15GB → ~8GB
+                device_map="auto",  # Auto device mapping for quantized models
+                low_cpu_mem_usage=True,
+                attn_implementation="eager",  # Disable flash attention (CPU compatible)
+            )
+        else:
+            # GPU: use float16 without quantization
+            model = AutoModel.from_pretrained(
+                MODEL_NAME,
+                trust_remote_code=True,
+                torch_dtype=torch.float16,
+                device_map="cuda",
+                attn_implementation="eager",
+            )
 
         model.eval()  # Set to evaluation mode
-
-        # CRITICAL: Force all model parameters and buffers to float32 on CPU
-        # Some layers may still be in bfloat16 causing dtype mismatches
-        if device == "cpu":
-            logger.info("Converting all model parameters to float32 for CPU compatibility...")
-            model = model.float()
-            # Also ensure all buffers are float32
-            for name, buffer in model.named_buffers():
-                if buffer.dtype == torch.bfloat16:
-                    buffer.data = buffer.data.float()
-            logger.info("✅ All model weights converted to float32")
-
-            # Set global default dtype to float32 for CPU
-            # This ensures all new tensors (including during inference) are float32
-            logger.info("Setting global default dtype to float32 for CPU...")
-            torch.set_default_dtype(torch.float32)
-            logger.info("✅ Global default dtype set to float32")
 
         logger.info(f"✅ Model loaded successfully on {device}")
         logger.info(f"   Model: {MODEL_NAME}")
         logger.info(f"   Device: {device}")
-        logger.info(f"   Dtype: {torch_dtype}")
+        logger.info(f"   Quantization: {'8-bit' if use_quantization else 'None (float16)'}")
 
         return True
 
