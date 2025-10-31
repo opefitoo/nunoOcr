@@ -16,6 +16,7 @@ import os
 import io
 import base64
 import logging
+import asyncio
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
@@ -36,7 +37,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Version info (updated with each deployment)
-VERSION = "2.7.0"  # Incremented when code changes
+VERSION = "2.8.0"  # Async processing to prevent container restarts
 GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
 BUILD_DATE = datetime.now().isoformat()  # Container start time
 
@@ -335,6 +336,60 @@ def extract_text_prompt(content: List[Dict]) -> str:
     return " ".join(text_parts)
 
 
+def run_ocr_inference(image: Image.Image, full_prompt: str) -> str:
+    """
+    Run OCR inference synchronously (blocking).
+
+    This function is designed to be called from a thread pool to avoid blocking
+    the main event loop.
+    """
+    import tempfile
+    import shutil
+
+    # Initialize paths for cleanup
+    temp_image_path = None
+    temp_output_dir = None
+
+    try:
+        # Create temp file for input image
+        tmp_img_fd, temp_image_path = tempfile.mkstemp(suffix='.png', dir='/tmp')
+        os.close(tmp_img_fd)
+        image.save(temp_image_path)
+        logger.info(f"Saved image to: {temp_image_path}")
+
+        # Create temp directory for output
+        temp_output_dir = tempfile.mkdtemp(dir='/tmp')
+        logger.info(f"Created temp output directory: {temp_output_dir}")
+
+        # Use patched model.infer() method (now CPU-compatible)
+        logger.info("Calling CPU-patched model.infer()...")
+        generated_text = model.infer(
+            tokenizer=processor,
+            prompt=full_prompt,
+            image_file=temp_image_path,
+            output_path=temp_output_dir,
+            save_results=False,
+            eval_mode=False
+        )
+
+        logger.info(f"✅ OCR completed (output length: {len(generated_text)} chars)")
+        return generated_text
+
+    except Exception as e:
+        logger.error(f"Error during inference: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise
+    finally:
+        # Clean up temp files
+        if temp_image_path and os.path.exists(temp_image_path):
+            os.unlink(temp_image_path)
+            logger.info(f"Cleaned up temp image: {temp_image_path}")
+        if temp_output_dir and os.path.exists(temp_output_dir):
+            shutil.rmtree(temp_output_dir)
+            logger.info(f"Cleaned up temp output dir: {temp_output_dir}")
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
     """
@@ -390,52 +445,10 @@ async def chat_completions(request: ChatCompletionRequest):
         logger.info(f"Processing OCR request (image size: {image.size})")
         logger.info(f"Prompt: {full_prompt[:100]}...")
 
-        # Save image temporarily for model.infer()
-        import tempfile
-        import os
-
-        # Initialize paths for cleanup
-        temp_image_path = None
-        temp_output_dir = None
-
-        try:
-            # Create temp file for input image
-            tmp_img_fd, temp_image_path = tempfile.mkstemp(suffix='.png', dir='/tmp')
-            os.close(tmp_img_fd)
-            image.save(temp_image_path)
-            logger.info(f"Saved image to: {temp_image_path}")
-
-            # Create temp directory for output
-            temp_output_dir = tempfile.mkdtemp(dir='/tmp')
-            logger.info(f"Created temp output directory: {temp_output_dir}")
-
-            # Use patched model.infer() method (now CPU-compatible)
-            logger.info("Calling CPU-patched model.infer()...")
-            generated_text = model.infer(
-                tokenizer=processor,
-                prompt=full_prompt,
-                image_file=temp_image_path,
-                output_path=temp_output_dir,
-                save_results=False,
-                eval_mode=False
-            )
-
-        except Exception as e:
-            logger.error(f"Error during inference: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            raise
-        finally:
-            # Clean up temp files
-            if temp_image_path and os.path.exists(temp_image_path):
-                os.unlink(temp_image_path)
-                logger.info(f"Cleaned up temp image: {temp_image_path}")
-            if temp_output_dir and os.path.exists(temp_output_dir):
-                import shutil
-                shutil.rmtree(temp_output_dir)
-                logger.info(f"Cleaned up temp output dir: {temp_output_dir}")
-
-        logger.info(f"✅ OCR completed (output length: {len(generated_text)} chars)")
+        # Run OCR inference in a thread pool to avoid blocking the event loop
+        # This allows FastAPI to continue serving health checks during long OCR processing
+        logger.info("Starting OCR in background thread...")
+        generated_text = await asyncio.to_thread(run_ocr_inference, image, full_prompt)
 
         # Format OpenAI-compatible response
         response = {
