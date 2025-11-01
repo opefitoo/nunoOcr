@@ -37,7 +37,7 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 # Version info (updated with each deployment)
-VERSION = "4.2.0"  # Fix: Capture stdout output from model.infer()
+VERSION = "4.2.1"  # Fix: Filter debug output from captured stdout
 GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")  # Set during build
 BUILD_DATE = datetime.now().isoformat()  # Container start time
 
@@ -401,9 +401,32 @@ def run_ocr_inference(image: Image.Image, full_prompt: str) -> str:
         # Get captured text
         captured_text = captured_output.getvalue()
 
+        # Clean the captured text - remove debug output
+        def clean_ocr_output(text: str) -> str:
+            """Remove debug lines from OCR output."""
+            lines = text.split('\n')
+            cleaned_lines = []
+
+            for line in lines:
+                # Skip debug lines
+                if any(debug_marker in line for debug_marker in [
+                    'BASE:', 'PATCHES:', 'torch.Size', '===========',
+                    'UserWarning', 'FutureWarning', 'DeprecationWarning',
+                    '/usr/local/lib/python', 'warnings.warn'
+                ]):
+                    continue
+
+                # Skip empty lines at the start
+                if not cleaned_lines and not line.strip():
+                    continue
+
+                cleaned_lines.append(line)
+
+            return '\n'.join(cleaned_lines).strip()
+
         # Use captured stdout if model.infer() returned None
         if generated_text is None or not generated_text.strip():
-            generated_text = captured_text.strip()
+            generated_text = clean_ocr_output(captured_text)
             logger.info(f"✅ OCR completed - captured from stdout (length: {len(generated_text)} chars)")
         else:
             logger.info(f"✅ OCR completed - returned by model (length: {len(generated_text)} chars)")
