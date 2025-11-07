@@ -402,7 +402,7 @@ class DeepSeekOCRClient:
         return_structured: bool = True
     ) -> Dict[str, Any]:
         """
-        Analyze a wound image and extract medical information.
+        Analyze a wound image and extract medical information in French.
 
         Args:
             file_obj: File object (image of wound)
@@ -410,53 +410,54 @@ class DeepSeekOCRClient:
             return_structured: If True, attempt to parse JSON response
 
         Returns:
-            Dictionary with wound analysis data
+            Dictionary with wound analysis data (in French)
 
         Example:
             with open('wound.jpg', 'rb') as f:
                 analysis = client.analyze_wound(f)
-                print(analysis['wound_type'])
+                print(analysis['type_plaie'])
                 print(analysis['dimensions'])
-                print(analysis['condition'])
+                print(analysis['etat_general'])
         """
         if return_structured:
             system_prompt = (
-                "You are a medical image analysis assistant specialized in wound assessment. "
-                "Analyze wound images and return ONLY a valid JSON object with these fields:\n"
-                "- wound_type: string (e.g., 'surgical incision', 'laceration', 'pressure ulcer')\n"
-                "- location: string (anatomical location)\n"
-                "- dimensions: object with 'length_cm' (number or null), 'width_cm' (number or null)\n"
-                "- healing_stage: string ('fresh', 'healing', 'healed', or 'unknown')\n"
-                "- closure_method: string ('stitches', 'staples', 'adhesive', 'none', or 'unknown')\n"
-                "- closure_count: number or null (number of stitches/staples if visible)\n"
-                "- signs_of_infection: array of strings (e.g., ['redness', 'swelling', 'discharge'])\n"
-                "- complications: array of strings (any visible complications)\n"
-                "- overall_condition: string (brief assessment)\n"
-                "- confidence: string ('high', 'medium', 'low')\n"
-                "- notes: string (additional observations)\n"
-                "Return ONLY the JSON object, no additional text."
+                "Vous êtes un assistant d'analyse d'images médicales spécialisé dans l'évaluation des plaies. "
+                "Analysez les images de plaies et retournez UNIQUEMENT un objet JSON valide avec ces champs EN FRANÇAIS:\n"
+                "- type_plaie: string (ex: 'incision chirurgicale', 'lacération', 'ulcère de pression', 'plaie post-opératoire')\n"
+                "- localisation: string (localisation anatomique en français)\n"
+                "- dimensions: objet avec 'longueur_cm' (nombre ou null), 'largeur_cm' (nombre ou null)\n"
+                "- stade_cicatrisation: string ('fraîche', 'en cours de cicatrisation', 'cicatrisée', ou 'indéterminé')\n"
+                "- methode_fermeture: string ('points de suture', 'agrafes', 'adhésif', 'aucune', ou 'indéterminé')\n"
+                "- nombre_points: nombre ou null (nombre de points/agrafes si visible)\n"
+                "- signes_infection: tableau de strings (ex: ['rougeur', 'gonflement', 'écoulement', 'chaleur'])\n"
+                "- complications: tableau de strings (complications visibles)\n"
+                "- etat_general: string (évaluation globale brève)\n"
+                "- confiance: string ('élevée', 'moyenne', 'faible')\n"
+                "- notes: string (observations supplémentaires)\n"
+                "Retournez UNIQUEMENT l'objet JSON, sans texte supplémentaire. TOUT doit être en français."
             )
 
             user_prompt = (
-                "Analyze this wound image and provide a detailed medical assessment. "
-                "Return the analysis as a JSON object with all requested fields."
+                "Analysez cette image de plaie et fournissez une évaluation médicale détaillée EN FRANÇAIS. "
+                "Retournez l'analyse sous forme d'objet JSON avec tous les champs demandés. "
+                "Toutes les valeurs doivent être en français."
             )
         else:
             system_prompt = (
-                "You are a medical image analysis assistant specialized in wound assessment. "
-                "Provide detailed, accurate descriptions of wounds in medical terminology."
+                "Vous êtes un assistant d'analyse d'images médicales spécialisé dans l'évaluation des plaies. "
+                "Fournissez des descriptions détaillées et précises des plaies en terminologie médicale française."
             )
 
             user_prompt = (
-                "Analyze this wound image and provide:\n"
-                "1. Wound type and anatomical location\n"
-                "2. Wound dimensions (approximate length and width in cm)\n"
-                "3. Healing stage (fresh/healing/healed)\n"
-                "4. Closure method (stitches/staples/adhesive/other)\n"
-                "5. Number of closure points (if applicable)\n"
-                "6. Signs of infection or complications (redness, swelling, discharge, etc.)\n"
-                "7. Overall wound condition and assessment\n"
-                "8. Any other relevant observations"
+                "Analysez cette image de plaie et fournissez EN FRANÇAIS:\n"
+                "1. Type de plaie et localisation anatomique\n"
+                "2. Dimensions de la plaie (longueur et largeur approximatives en cm)\n"
+                "3. Stade de cicatrisation (fraîche/en cours de cicatrisation/cicatrisée)\n"
+                "4. Méthode de fermeture (points de suture/agrafes/adhésif/autre)\n"
+                "5. Nombre de points de fermeture (si applicable)\n"
+                "6. Signes d'infection ou complications (rougeur, gonflement, écoulement, etc.)\n"
+                "7. État général de la plaie et évaluation\n"
+                "8. Toute autre observation pertinente"
             )
 
         image_data_uri = self._image_to_base64(file_obj, file_type)
