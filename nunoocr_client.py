@@ -395,6 +395,127 @@ class DeepSeekOCRClient:
             'total_pages': len(pages)
         }
 
+    def analyze_wound(
+        self,
+        file_obj: BinaryIO,
+        file_type: str = 'auto',
+        return_structured: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Analyze a wound image and extract medical information.
+
+        Args:
+            file_obj: File object (image of wound)
+            file_type: File type ('image', 'pdf', or 'auto')
+            return_structured: If True, attempt to parse JSON response
+
+        Returns:
+            Dictionary with wound analysis data
+
+        Example:
+            with open('wound.jpg', 'rb') as f:
+                analysis = client.analyze_wound(f)
+                print(analysis['wound_type'])
+                print(analysis['dimensions'])
+                print(analysis['condition'])
+        """
+        if return_structured:
+            system_prompt = (
+                "You are a medical image analysis assistant specialized in wound assessment. "
+                "Analyze wound images and return ONLY a valid JSON object with these fields:\n"
+                "- wound_type: string (e.g., 'surgical incision', 'laceration', 'pressure ulcer')\n"
+                "- location: string (anatomical location)\n"
+                "- dimensions: object with 'length_cm' (number or null), 'width_cm' (number or null)\n"
+                "- healing_stage: string ('fresh', 'healing', 'healed', or 'unknown')\n"
+                "- closure_method: string ('stitches', 'staples', 'adhesive', 'none', or 'unknown')\n"
+                "- closure_count: number or null (number of stitches/staples if visible)\n"
+                "- signs_of_infection: array of strings (e.g., ['redness', 'swelling', 'discharge'])\n"
+                "- complications: array of strings (any visible complications)\n"
+                "- overall_condition: string (brief assessment)\n"
+                "- confidence: string ('high', 'medium', 'low')\n"
+                "- notes: string (additional observations)\n"
+                "Return ONLY the JSON object, no additional text."
+            )
+
+            user_prompt = (
+                "Analyze this wound image and provide a detailed medical assessment. "
+                "Return the analysis as a JSON object with all requested fields."
+            )
+        else:
+            system_prompt = (
+                "You are a medical image analysis assistant specialized in wound assessment. "
+                "Provide detailed, accurate descriptions of wounds in medical terminology."
+            )
+
+            user_prompt = (
+                "Analyze this wound image and provide:\n"
+                "1. Wound type and anatomical location\n"
+                "2. Wound dimensions (approximate length and width in cm)\n"
+                "3. Healing stage (fresh/healing/healed)\n"
+                "4. Closure method (stitches/staples/adhesive/other)\n"
+                "5. Number of closure points (if applicable)\n"
+                "6. Signs of infection or complications (redness, swelling, discharge, etc.)\n"
+                "7. Overall wound condition and assessment\n"
+                "8. Any other relevant observations"
+            )
+
+        image_data_uri = self._image_to_base64(file_obj, file_type)
+        response = self._make_request(
+            system_prompt,
+            user_prompt,
+            image_data_uri,
+            temperature=0.0,
+            max_tokens=2000
+        )
+
+        # Extract content from response
+        content = response['choices'][0]['message']['content']
+
+        if return_structured:
+            # Try to extract and parse JSON from response
+            try:
+                # Find JSON object in response
+                start_idx = content.find('{')
+                end_idx = content.rfind('}') + 1
+
+                if start_idx != -1 and end_idx > start_idx:
+                    json_str = content[start_idx:end_idx]
+                    data = json.loads(json_str)
+                else:
+                    # Fallback: try parsing entire content
+                    data = json.loads(content)
+
+                # Add metadata
+                data['_metadata'] = {
+                    'tokens_used': response.get('usage', {}).get('total_tokens', 0),
+                    'model': response.get('model', 'unknown'),
+                    'raw_response': content
+                }
+
+                return data
+
+            except json.JSONDecodeError as e:
+                # If JSON parsing fails, return as unstructured text
+                return {
+                    'analysis': content,
+                    'structured': False,
+                    '_metadata': {
+                        'tokens_used': response.get('usage', {}).get('total_tokens', 0),
+                        'model': response.get('model', 'unknown'),
+                        'parse_error': str(e)
+                    }
+                }
+        else:
+            # Return unstructured text response
+            return {
+                'analysis': content,
+                'structured': False,
+                '_metadata': {
+                    'tokens_used': response.get('usage', {}).get('total_tokens', 0),
+                    'model': response.get('model', 'unknown')
+                }
+            }
+
 
 # Django integration helper
 class DjangoOCRService:
@@ -449,3 +570,27 @@ class DjangoOCRService:
             return self.client.extract_prescription_data(uploaded_file, file_type)
         else:
             return self.client.extract_text(uploaded_file, file_type)
+
+    def analyze_wound_from_uploaded_file(
+        self,
+        uploaded_file,
+        return_structured: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Analyze wound from Django UploadedFile object.
+
+        Args:
+            uploaded_file: Django UploadedFile from request.FILES
+            return_structured: If True, return structured JSON data
+
+        Returns:
+            Dictionary with wound analysis data
+
+        Example:
+            ocr = DjangoOCRService()
+            analysis = ocr.analyze_wound_from_uploaded_file(
+                request.FILES['wound_image']
+            )
+        """
+        file_type = 'pdf' if uploaded_file.name.lower().endswith('.pdf') else 'image'
+        return self.client.analyze_wound(uploaded_file, file_type, return_structured)
