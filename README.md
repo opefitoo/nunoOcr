@@ -1,20 +1,34 @@
-# Nuno OCR Service
+# nunoOcr - Medical AI Service
 
-DeepSeek-OCR microservice for extracting text from medical prescription scans in the Nuno Django application.
+Unified microservice for medical document analysis and wound assessment.
 
 ## Overview
 
-This service provides a standalone OCR API using DeepSeek-OCR (Rust implementation) that can be called from the Nuno Django application to extract text and structured data from medical prescription images and PDFs.
+nunoOcr is a centralized AI service that provides:
+- **OCR for Prescriptions** - DeepSeek-OCR for extracting text from medical documents
+- **Wound Analysis** - GPT-4 Vision / Claude Vision for analyzing wound images
+
+This service acts as a secure gateway between your Django application and various AI providers (OpenAI, Anthropic), ensuring your Django app never needs to handle external AI API keys directly.
 
 ## Features
 
+### OCR for Prescriptions
 - **High-accuracy OCR** - DeepSeek-OCR model optimized for document text extraction
-- **OpenAI-compatible API** - Easy integration with existing OpenAI client libraries
-- **Multi-language support** - Works with French, English, German, and other European languages
+- **Multi-language support** - French, English, German, and other European languages
+- **Self-hosted** - Unlimited usage, no per-request costs
+- **GPU optional** - Works on CPU with optional GPU acceleration
+
+### Wound Analysis (NEW!)
+- **GPT-4 Vision / Claude Vision** - Professional medical image analysis
+- **Structured French output** - JSON format with medical fields
+- **Centralized API keys** - Django never sees OpenAI/Claude keys
+- **Easy provider switching** - OpenAI ↔ Claude with one env var
+
+### General
+- **OpenAI-compatible API** - Easy integration with existing clients
 - **Docker-based** - Easy deployment and scaling
-- **GPU optional** - Works on CPU, with optional GPU acceleration
-- **Model caching** - Downloads model once, cached locally
-- **Health checks** - Built-in monitoring and health endpoints
+- **Health checks** - Built-in monitoring endpoints
+- **Microservice architecture** - Single service for all AI needs
 
 ## Prerequisites
 
@@ -23,49 +37,86 @@ This service provides a standalone OCR API using DeepSeek-OCR (Rust implementati
 - ~4GB disk space for model weights (downloaded on first run)
 - (Optional) NVIDIA GPU with nvidia-docker for acceleration
 
-## Quick Start
+## 🚀 Quick Start
 
-### 1. Start the service
+### For Microservice Architecture (Recommended)
+
+See **[QUICK_START_MICROSERVICE.md](QUICK_START_MICROSERVICE.md)** for complete setup guide.
+
+**TL;DR**:
+1. Deploy nunoOcr service with `OPENAI_API_KEY`
+2. Configure Django with `NUNOOCR_SERVICE_URL`
+3. Django calls nunoOcr → nunoOcr calls OpenAI
+
+### For Direct OpenAI Integration (Legacy)
+
+If you want Django to call OpenAI directly (not recommended):
+
+1. Configure Django with `OPENAI_API_KEY`
+2. Use `nunoocr_client.py` with `vision_api_key` parameter
+
+## 📚 Documentation
+
+| Document | Description |
+|----------|-------------|
+| **[QUICK_START_MICROSERVICE.md](QUICK_START_MICROSERVICE.md)** | 🚀 Quick deployment guide (3 steps) |
+| **[MICROSERVICE_ARCHITECTURE.md](MICROSERVICE_ARCHITECTURE.md)** | 🏗️ Complete architecture explanation |
+| **[API_KEYS_EXPLAINED.md](API_KEYS_EXPLAINED.md)** | 🔑 Understanding the two types of API keys |
+| **[API_KEY_SETUP.md](API_KEY_SETUP.md)** | 🔐 Setup API Key authentication in Django |
+| **[API_SECURITY.md](API_SECURITY.md)** | 🛡️ Security and rate limiting guide |
+| **[INTEGRATION_CHECKLIST.md](INTEGRATION_CHECKLIST.md)** | ✅ Complete integration checklist |
+
+## 🎯 Service Endpoints
+
+### OCR Endpoint (Prescriptions)
+```bash
+POST /v1/chat/completions
+```
+OpenAI-compatible endpoint for prescription OCR using DeepSeek-OCR
+
+### Wound Analysis Endpoints (NEW!)
+```bash
+POST /v1/analyze-wound
+```
+Analyze single wound image (returns structured French JSON)
 
 ```bash
-docker-compose up -d
+POST /v1/compare-wound-progress
 ```
+Compare multiple wound images over time for progression tracking
 
-The service will:
-- Download the DeepSeek-OCR model (~3-4GB) on first run
-- Start the API server on http://localhost:8765
-- Cache the model in `./models/` directory
-
-**Note:** First startup may take 5-10 minutes to download the model. Watch the logs:
-
+### Health Check
 ```bash
-docker-compose logs -f deepseek-ocr
+GET /health
 ```
-
-### 2. Check service health
-
-```bash
-curl http://localhost:8765/health
-```
-
-Expected response: `{"status":"ok"}`
-
-### 3. Test with a sample image
-
-See the [Testing](#testing) section below.
+Returns service status and configuration
 
 ## Configuration
 
 ### Environment Variables
 
-Copy `.env.example` to `.env` and customize:
+For nunoOcr service (in Dokploy or docker-compose):
 
 ```bash
-cp .env.example .env
+# Required for wound analysis
+OPENAI_API_KEY=sk-proj-xxxxx  # Your OpenAI API key
+VISION_PROVIDER=openai         # or 'anthropic' for Claude
+
+# Optional - OCR configuration
+MODEL_NAME=deepseek-ai/DeepSeek-OCR
+HOST=0.0.0.0
+PORT=8000
 ```
 
-Available options:
-- `API_KEY` - Optional API key for authentication (leave empty for no auth)
+For Django application:
+
+```bash
+# URL of the nunoOcr service
+NUNOOCR_SERVICE_URL=http://localhost:8765  # or http://nunoocr:8000 in Docker
+
+# NOT needed in Django:
+# OPENAI_API_KEY - handled by nunoOcr service!
+```
 
 ### GPU Support
 
@@ -169,33 +220,62 @@ For medical prescriptions, use a specific system prompt to extract structured da
 }
 ```
 
-## Django Integration
+## 🏗️ Architecture
 
-### Install Python Client
+### Microservice Architecture (Recommended)
 
-Add the client library to your Django project:
-
-```bash
-pip install openai requests pillow
+```
+Client (Mobile/Web)
+    ↓ Authorization: Bearer nuno_xxxxx (your API Key)
+Django App (inur.opefitoo.com)
+    ↓ Validates API Key + quota
+    ↓ POST http://nunoocr:8765/v1/analyze-wound
+nunoOcr Service
+    ↓ Uses OPENAI_API_KEY (stored here)
+OpenAI/Claude API
+    ↓ Returns analysis
+Client receives result
 ```
 
-### Use in Django Views
+**Benefits**:
+- ✅ Django never knows OpenAI keys
+- ✅ Easy to switch AI providers
+- ✅ Centralized monitoring and caching
+- ✅ Better security
+
+See [MICROSERVICE_ARCHITECTURE.md](MICROSERVICE_ARCHITECTURE.md) for details.
+
+## Django Integration
+
+### Microservice Mode (Recommended)
+
+```python
+from .nunoocr_client import NunoOcrServiceClient
+
+# Initialize client pointing to nunoOcr service
+client = NunoOcrServiceClient(
+    base_url="http://nunoocr:8765"  # No API key needed!
+)
+
+# Analyze wound
+result = client.analyze_wound(request.FILES['wound_image'])
+```
+
+### Direct Mode (Legacy)
 
 ```python
 from nunoocr_client import DeepSeekOCRClient
 
-# Initialize client
-ocr_client = DeepSeekOCRClient(base_url="http://localhost:8765")
+# Initialize with OpenAI key directly (not recommended)
+client = DeepSeekOCRClient(
+    vision_api_key=settings.OPENAI_API_KEY,
+    vision_provider='openai'
+)
 
-# Extract text from prescription image
-with open('prescription.pdf', 'rb') as f:
-    result = ocr_client.extract_text(f, file_type='pdf')
-
-print(result['text'])  # Extracted text
-print(result['confidence'])  # Confidence score if available
+result = client.analyze_wound_from_uploaded_file(wound_image)
 ```
 
-See `nunoocr_client.py` for the complete client implementation.
+See `django_microservice_integration.py` for complete examples.
 
 ## Testing
 
