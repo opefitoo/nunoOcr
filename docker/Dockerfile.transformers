@@ -28,6 +28,7 @@ RUN pip install --no-cache-dir \
     "fastapi>=0.104.0" \
     "uvicorn[standard]>=0.24.0" \
     "python-multipart>=0.0.6" \
+    "requests>=2.31.0" \
     "addict>=2.4.0" \
     "easydict>=1.10" \
     "matplotlib>=3.7.0" \
@@ -38,8 +39,8 @@ RUN pip install --no-cache-dir \
     "numpy>=1.24.0" \
     "scipy>=1.10.0"
 
-# Copy the transformers-based server
-COPY server_transformers.py /app/server.py
+# Copy the transformers-based server with wound analysis
+COPY server_with_wound_analysis.py /app/server.py
 
 # Health check endpoint
 # Disabled temporarily to allow initial model loading (10-15 min)
