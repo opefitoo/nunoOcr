@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test nunoOcr v2 SSE - Analyse de Plaie en Temps Réel</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #555;
+        }
+        input[type="text"],
+        input[type="file"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            padding: 12px 30px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .progress-container {
+            margin-top: 30px;
+            display: none;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 30px;
+            background: #f0f0f0;
+            border-radius: 15px;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #8BC34A);
+            width: 0%;
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+        }
+        .progress-message {
+            color: #666;
+            font-style: italic;
+        }
+        .result-container {
+            margin-top: 30px;
+            display: none;
+        }
+        .result {
+            background: #f9f9f9;
+            padding: 20px;
+            border-radius: 4px;
+            border-left: 4px solid #4CAF50;
+        }
+        .error {
+            background: #fee;
+            border-left-color: #f44336;
+            color: #c00;
+        }
+        .log {
+            background: #f5f5f5;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .log-entry {
+            padding: 4px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .log-time {
+            color: #888;
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏥 Test nunoOcr v2 - Analyse en Temps Réel</h1>
+
+        <div class="form-group">
+            <label for="apiUrl">URL de l'API:</label>
+            <input type="text" id="apiUrl" value="http://46.224.6.193:8765/v2/analyze-wound" />
+        </div>
+
+        <div class="form-group">
+            <label for="apiKey">Service API Key:</label>
+            <input type="text" id="apiKey" placeholder="nuno_service_..." />
+            <small style="color: #888;">Optionnel si SERVICE_API_KEY n'est pas configuré</small>
+        </div>
+
+        <div class="form-group">
+            <label for="imageFile">Image de la plaie:</label>
+            <input type="file" id="imageFile" accept="image/*" />
+        </div>
+
+        <button id="analyzeBtn" onclick="analyzeWound()">🔍 Analyser avec SSE</button>
+        <button id="analyzeFetchBtn" onclick="analyzeWoundWithFetch()">📡 Analyser avec Fetch Streaming</button>
+
+        <div class="progress-container" id="progressContainer">
+            <h3>Progression:</h3>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill">0%</div>
+            </div>
+            <p class="progress-message" id="progressMessage">En attente...</p>
+        </div>
+
+        <div class="result-container" id="resultContainer">
+            <h3>Résultat:</h3>
+            <pre id="result" class="result"></pre>
+        </div>
+
+        <div class="log" id="logContainer">
+            <strong>Journal des événements:</strong>
+            <div id="logEntries"></div>
+        </div>
+    </div>
+
+    <script>
+        function addLog(message, type = 'info') {
+            const log = document.getElementById('logEntries');
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `<span class="log-time">${time}</span><span style="color: ${type === 'error' ? 'red' : type === 'success' ? 'green' : '#333'}">${message}</span>`;
+            log.appendChild(entry);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function updateProgress(percent, message) {
+            const fill = document.getElementById('progressFill');
+            const msg = document.getElementById('progressMessage');
+            fill.style.width = percent + '%';
+            fill.textContent = percent + '%';
+            msg.textContent = message;
+        }
+
+        function showProgress() {
+            document.getElementById('progressContainer').style.display = 'block';
+            document.getElementById('resultContainer').style.display = 'none';
+        }
+
+        function showResult(data, isError = false) {
+            const container = document.getElementById('resultContainer');
+            const result = document.getElementById('result');
+            container.style.display = 'block';
+            result.className = isError ? 'result error' : 'result';
+            result.textContent = JSON.stringify(data, null, 2);
+        }
+
+        async function analyzeWound() {
+            const apiUrl = document.getElementById('apiUrl').value;
+            const apiKey = document.getElementById('apiKey').value;
+            const fileInput = document.getElementById('imageFile');
+
+            if (!fileInput.files || !fileInput.files[0]) {
+                alert('Veuillez sélectionner une image');
+                return;
+            }
+
+            addLog('🚀 Démarrage de l\'analyse avec SSE...');
+            showProgress();
+            updateProgress(0, 'Préparation...');
+
+            const formData = new FormData();
+            formData.append('wound_image', fileInput.files[0]);
+
+            try {
+                const headers = {};
+                if (apiKey) {
+                    headers['Authorization'] = `Bearer ${apiKey}`;
+                }
+
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: headers,
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                addLog('✅ Connexion établie, lecture du stream SSE...');
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const {done, value} = await reader.read();
+
+                    if (done) {
+                        addLog('✅ Stream terminé');
+                        break;
+                    }
+
+                    buffer += decoder.decode(value, {stream: true});
+                    const lines = buffer.split('\n\n');
+                    buffer = lines.pop(); // Keep incomplete line in buffer
+
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+
+                        const eventMatch = line.match(/event: (\w+)\ndata: (.+)/s);
+                        if (eventMatch) {
+                            const [, eventType, dataStr] = eventMatch;
+                            const data = JSON.parse(dataStr);
+
+                            addLog(`📨 Event: ${eventType}`, 'info');
+
+                            if (eventType === 'progress') {
+                                updateProgress(data.percent, data.message);
+                                addLog(`   📊 ${data.percent}% - ${data.message}`);
+                            } else if (eventType === 'result') {
+                                addLog('🎉 Résultat reçu!', 'success');
+                                updateProgress(100, 'Terminé!');
+                                showResult(data.data);
+                            } else if (eventType === 'error') {
+                                addLog(`❌ Erreur: ${data.error}`, 'error');
+                                showResult(data, true);
+                            } else if (eventType === 'complete') {
+                                addLog('✅ Analyse complète', 'success');
+                            }
+                        }
+                    }
+                }
+
+            } catch (error) {
+                addLog(`❌ Erreur: ${error.message}`, 'error');
+                showResult({error: error.message}, true);
+            }
+        }
+
+        async function analyzeWoundWithFetch() {
+            addLog('🚀 Démarrage avec Fetch API (méthode alternative)...');
+            // Same implementation as above, but using different API if needed
+            analyzeWound();
+        }
+
+        // Initialize
+        addLog('✅ Client SSE initialisé et prêt');
+    </script>
+</body>
+</html>

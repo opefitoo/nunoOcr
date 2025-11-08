@@ -19,6 +19,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, UploadFile, File, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import uvicorn
 import requests
@@ -849,6 +850,166 @@ async def analyze_wound(
             success=False,
             error=str(e)
         )
+
+
+@app.post("/v2/analyze-wound")
+async def analyze_wound_v2_sse(
+    request: Request,
+    wound_image: UploadFile = File(...),
+    authorization: Optional[str] = Header(None)
+):
+    """
+    Analyze wound image using vision AI with Server-Sent Events (SSE) for real-time progress.
+
+    This endpoint streams progress updates to the client as the analysis progresses.
+
+    Security:
+    - Requires SERVICE_API_KEY in Authorization header
+    - Optional IP whitelist
+
+    Usage from client (JavaScript example):
+        const eventSource = new EventSource('/v2/analyze-wound');
+
+        eventSource.addEventListener('progress', (e) => {
+            const data = JSON.parse(e.data);
+            console.log(data.message, data.percent);
+        });
+
+        eventSource.addEventListener('result', (e) => {
+            const data = JSON.parse(e.data);
+            console.log('Analysis complete:', data);
+            eventSource.close();
+        });
+
+        eventSource.addEventListener('error', (e) => {
+            const data = JSON.parse(e.data);
+            console.error('Error:', data.error);
+            eventSource.close();
+        });
+
+    Or using fetch with streaming:
+        const response = await fetch('/v2/analyze-wound', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer YOUR_SERVICE_API_KEY'
+            },
+            body: formData
+        });
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+            const {done, value} = await reader.read();
+            if (done) break;
+
+            const text = decoder.decode(value);
+            const lines = text.split('\\n\\n');
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    const data = JSON.parse(line.slice(6));
+                    console.log(data);
+                }
+            }
+        }
+
+    Returns:
+        Server-Sent Events stream with:
+        - event: progress - Progress updates with percentage
+        - event: result - Final analysis result
+        - event: error - Error information
+    """
+    # Verify security
+    verify_service_api_key(authorization)
+    verify_ip_whitelist(request)
+
+    async def event_generator():
+        """Generate SSE events for real-time progress updates."""
+        try:
+            # Send initial progress
+            yield f"event: progress\ndata: {{'message': 'Réception de l\\'image...', 'percent': 0}}\n\n"
+
+            # Read image
+            image_content = await wound_image.read()
+
+            # Validate size (5MB max)
+            if len(image_content) > 5 * 1024 * 1024:
+                error_data = {
+                    "success": False,
+                    "error": "Image trop grande (max 5MB)"
+                }
+                yield f"event: error\ndata: {error_data}\n\n"
+                return
+
+            yield f"event: progress\ndata: {{'message': 'Image reçue, préparation...', 'percent': 20}}\n\n"
+
+            # Convert to base64
+            image_base64 = _image_to_base64(image_content)
+
+            yield f"event: progress\ndata: {{'message': 'Envoi vers l\\'API Vision...', 'percent': 40}}\n\n"
+
+            # Call appropriate vision API
+            if VISION_PROVIDER == "openai":
+                yield f"event: progress\ndata: {{'message': 'Analyse en cours (OpenAI GPT-4 Vision)...', 'percent': 60}}\n\n"
+                data = _analyze_with_openai_vision(image_base64)
+            elif VISION_PROVIDER == "anthropic":
+                yield f"event: progress\ndata: {{'message': 'Analyse en cours (Claude Vision)...', 'percent': 60}}\n\n"
+                data = _analyze_with_claude_vision(image_base64)
+            else:
+                error_data = {
+                    "success": False,
+                    "error": f"Invalid vision provider: {VISION_PROVIDER}"
+                }
+                yield f"event: error\ndata: {error_data}\n\n"
+                return
+
+            yield f"event: progress\ndata: {{'message': 'Analyse terminée, formatage des résultats...', 'percent': 90}}\n\n"
+
+            logger.info("Wound analysis completed successfully")
+
+            # Send final result
+            result = {
+                "success": True,
+                "data": data,
+                "percent": 100
+            }
+
+            # Format as JSON string for SSE
+            import json
+            result_json = json.dumps(result, ensure_ascii=False)
+
+            yield f"event: result\ndata: {result_json}\n\n"
+
+            # Send completion message
+            yield f"event: complete\ndata: {{'message': 'Analyse terminée'}}\n\n"
+
+        except HTTPException as e:
+            error_data = {
+                "success": False,
+                "error": str(e.detail),
+                "status_code": e.status_code
+            }
+            import json
+            yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
+        except Exception as e:
+            logger.error(f"Wound analysis error: {e}")
+            error_data = {
+                "success": False,
+                "error": str(e)
+            }
+            import json
+            yield f"event: error\ndata: {json.dumps(error_data)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        }
+    )
 
 
 @app.post("/v1/compare-wound-progress")
