@@ -361,3 +361,6 @@ yarn-error.log*
 *.swp
 *.swo
 Thumbs.db
+
+# Test files with potential secrets
+test_*.py
