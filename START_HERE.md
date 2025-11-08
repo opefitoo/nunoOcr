@@ -33,13 +33,34 @@ docker compose up -d
 docker logs nunoocr_deepseek --tail 50
 ```
 
-#### 2. Configurer Variables d'Environnement
+#### 2. Générer Service API Key
+
+```bash
+# Sur votre machine locale
+python3 -c "import secrets; print(f'nuno_service_{secrets.token_urlsafe(40)}')"
+
+# Output (exemple):
+nuno_service_8kJ2mP9xQ4nL7vR3wS6tY1dF5hK0zB8cN4vM2pQ9xW7sT3yL
+```
+
+**⚠️ IMPORTANT**: Copiez cette clé, vous en aurez besoin 2 fois!
+
+#### 3. Configurer Variables d'Environnement
 
 **Dans Dokploy → nunoOcr → Environment Variables**:
 
 ```bash
+# Sécurité service-to-service (REQUIS!)
+SERVICE_API_KEY=nuno_service_8kJ2mP9xQ4nL7vR3wS6tY1dF5hK0zB8cN4vM2pQ9xW7sT3yL
+
+# Whitelist IP (optionnel mais recommandé)
+ALLOWED_IPS=123.45.67.89  # IP de votre serveur Django
+
+# Vision API
 OPENAI_API_KEY=sk-proj-rHu_SrM8g...
 VISION_PROVIDER=openai
+
+# OCR
 MODEL_NAME=deepseek-ai/DeepSeek-OCR
 HOST=0.0.0.0
 PORT=8000
@@ -288,13 +309,25 @@ class APIKeyAdmin(admin.ModelAdmin):
 **Dans `inur/settings.py`**, ajouter:
 
 ```python
+import os
+
 # URL du service nunoOcr
 NUNOOCR_SERVICE_URL = os.getenv(
     'NUNOOCR_SERVICE_URL',
     'http://46.224.6.193:8765'  # ou http://nunoocr:8000 si Docker network
 )
 
-# PAS de OPENAI_API_KEY ici!
+# Service API Key (LA MÊME que dans nunoOcr!)
+NUNOOCR_SERVICE_API_KEY = os.getenv('NUNOOCR_SERVICE_API_KEY')
+
+# PAS de OPENAI_API_KEY ici! Elle est dans nunoOcr
+```
+
+**Ou dans `.env` / Dokploy variables d'environnement**:
+
+```bash
+NUNOOCR_SERVICE_URL=http://46.224.6.193:8765
+NUNOOCR_SERVICE_API_KEY=nuno_service_8kJ2mP9xQ4nL7vR3wS6tY1dF5hK0zB8cN4vM2pQ9xW7sT3yL
 ```
 
 #### 8. Migrer la Base de Données
@@ -390,25 +423,37 @@ curl https://inur.opefitoo.com/api/key-info/ \
 
 ## 🎉 Résultat Final
 
-Vous avez maintenant:
+Vous avez maintenant **triple sécurité**:
 
 ```
 Client (Mobile/Web)
-  ↓ Authorization: Bearer nuno_xxxxx ← API Key (quota 10/jour)
+  ↓ Authorization: Bearer nuno_user_abc123 ← API Key User (Niveau 1)
+
 Django (inur.opefitoo.com)
-  ↓ Vérifie quota ✓
-  ↓ POST http://nunoocr:8765/v1/analyze-wound
+  ↓ Vérifie API Key user + quota ✓
+  ↓ Authorization: Bearer nuno_service_xyz789 ← API Key Service (Niveau 2)
+  ↓ POST http://46.224.6.193:8765/v1/analyze-wound
+
 nunoOcr Service (46.224.6.193:8765)
-  ↓ Utilise OPENAI_API_KEY (stockée ici) ✓
+  ↓ Vérifie API Key service ✓
+  ↓ Vérifie IP whitelist ✓
+  ↓ Authorization: Bearer sk-proj-xxxxx ← Clé OpenAI (Niveau 3)
+
 OpenAI API
   ↓ Analyse l'image
   ↓ Retourne JSON français
+
 Client reçoit l'analyse + quota restant
 ```
 
-**Sécurité**: ✅ Django ne connaît jamais la clé OpenAI
+**Sécurité**:
+- ✅ Niveau 1: Clients authentifiés avec quota
+- ✅ Niveau 2: Service-to-service avec API Key
+- ✅ Niveau 3: nunoOcr authentifié auprès OpenAI
+- ✅ Django ne connaît jamais la clé OpenAI
+
 **Flexibilité**: ✅ Changer de provider en 1 ligne
-**Protection**: ✅ Quotas quotidiens par utilisateur
+**Protection**: ✅ Impossible d'appeler nunoOcr sans la bonne clé
 
 ## 🆘 Problèmes Courants
 
