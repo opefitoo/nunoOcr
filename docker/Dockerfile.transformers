@@ -40,8 +40,8 @@ RUN pip install --no-cache-dir \
     "scipy>=1.10.0"
 
 # Copy the transformers-based server with wound analysis
-# Context is ./docker so we need to go up one level
-COPY ../server_with_wound_analysis.py /app/server.py
+# Context is now . (root) so we can access directly
+COPY server_with_wound_analysis.py /app/server.py
 
 # Health check endpoint
 # Disabled temporarily to allow initial model loading (10-15 min)

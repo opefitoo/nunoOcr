@@ -1,8 +1,8 @@
 services:
   deepseek-ocr:
     build:
-      context: ./docker
-      dockerfile: Dockerfile.transformers
+      context: .
+      dockerfile: docker/Dockerfile.transformers
     container_name: nunoocr_deepseek
     restart: unless-stopped
 
