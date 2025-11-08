@@ -11,14 +11,19 @@ Security:
 """
 
 import os
+import io
 import logging
 import base64
+import asyncio
 from typing import Optional, List, Dict, Any
+from datetime import datetime
 from fastapi import FastAPI, HTTPException, UploadFile, File, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 import requests
+import torch
+from PIL import Image
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +33,11 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-OCR")
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
+
+# Version info
+VERSION = "4.3.0"  # Unified OCR + Wound Analysis with transformers
+GIT_COMMIT = os.getenv("GIT_COMMIT", "unknown")
+BUILD_DATE = datetime.now().isoformat()
 
 # Vision API configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -54,8 +64,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global model instance (will be initialized on startup)
-llm = None
+# Global model instances (transformers-based)
+model = None
+processor = None
+device = None
 
 
 class ChatMessage(BaseModel):
@@ -77,30 +89,171 @@ class WoundAnalysisResponse(BaseModel):
     error: Optional[str] = None
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the vLLM model on startup."""
-    global llm
-
-    logger.info(f"Loading model: {MODEL_NAME}")
-    logger.info("This may take several minutes on first run (downloading model)...")
+def load_model():
+    """Load the DeepSeek-OCR model using transformers."""
+    global model, processor, device
 
     try:
-        from vllm import LLM, SamplingParams
+        from transformers import AutoModel, AutoTokenizer
+        import types
 
-        # Initialize vLLM with DeepSeek-OCR
-        llm = LLM(
-            model=MODEL_NAME,
-            trust_remote_code=True,
-            max_model_len=8192,
-            gpu_memory_utilization=0.9,
+        # Monkey patch: Handle missing Flash Attention gracefully
+        try:
+            import transformers.models.llama.modeling_llama as llama_module
+            if not hasattr(llama_module, 'LlamaFlashAttention2'):
+                logger.info("Patching missing LlamaFlashAttention2 for CPU compatibility")
+                class DummyFlashAttention:
+                    pass
+                llama_module.LlamaFlashAttention2 = DummyFlashAttention
+        except Exception as e:
+            logger.warning(f"Could not patch flash attention: {e}")
+
+        # CRITICAL: Globally monkey-patch torch.Tensor.cuda() for CPU compatibility
+        logger.info("Globally patching torch.Tensor.cuda() for CPU compatibility...")
+        original_cuda = torch.Tensor.cuda
+
+        def cpu_compatible_cuda(self, device_arg=None, **kwargs):
+            """Redirect .cuda() calls to .cpu() when CUDA is unavailable"""
+            if not torch.cuda.is_available():
+                return self
+            return original_cuda(self, device_arg, **kwargs)
+
+        torch.Tensor.cuda = cpu_compatible_cuda
+        logger.info("✅ torch.Tensor.cuda() globally patched")
+
+        # Patch .bfloat16() calls for CPU compatibility
+        logger.info("Patching torch.Tensor.bfloat16() for CPU compatibility...")
+        original_bfloat16 = torch.Tensor.bfloat16
+
+        def cpu_compatible_bfloat16(self):
+            """Convert bfloat16() to float32() on CPU for compatibility"""
+            if not torch.cuda.is_available():
+                return self.float()
+            return original_bfloat16(self)
+
+        torch.Tensor.bfloat16 = cpu_compatible_bfloat16
+        logger.info("✅ torch.Tensor.bfloat16() patched to use float32 on CPU")
+
+        # Patch .to() method to prevent bfloat16 conversion on CPU
+        logger.info("Patching torch.Tensor.to() to prevent bfloat16 on CPU...")
+        original_to = torch.Tensor.to
+
+        def cpu_compatible_to(self, *args, **kwargs):
+            """Intercept .to() calls and replace bfloat16 with float32 on CPU"""
+            if not torch.cuda.is_available():
+                if args and args[0] == torch.bfloat16:
+                    args = (torch.float32,) + args[1:]
+                elif 'dtype' in kwargs and kwargs['dtype'] == torch.bfloat16:
+                    kwargs['dtype'] = torch.float32
+            return original_to(self, *args, **kwargs)
+
+        torch.Tensor.to = cpu_compatible_to
+        logger.info("✅ torch.Tensor.to() patched to prevent bfloat16 on CPU")
+
+        # Fix transformers version incompatibility: DynamicCache API changes
+        logger.info("Patching DynamicCache for API compatibility...")
+        from transformers.cache_utils import DynamicCache
+
+        # Add missing seen_tokens property
+        if not hasattr(DynamicCache, 'seen_tokens'):
+            @property
+            def seen_tokens(self):
+                """Compatibility property for older model code"""
+                if hasattr(self, 'get_seq_length'):
+                    return self.get_seq_length()
+                if self.key_cache and len(self.key_cache) > 0 and self.key_cache[0] is not None:
+                    return self.key_cache[0].shape[2]
+                return 0
+
+            DynamicCache.seen_tokens = seen_tokens
+            logger.info("✅ DynamicCache.seen_tokens property added")
+
+        # Add missing get_max_length method
+        if not hasattr(DynamicCache, 'get_max_length'):
+            def get_max_length(self):
+                """Return maximum cache length (None means unlimited)"""
+                return None
+
+            DynamicCache.get_max_length = get_max_length
+            logger.info("✅ DynamicCache.get_max_length() method added")
+
+        # Add missing get_usable_length method
+        if not hasattr(DynamicCache, 'get_usable_length'):
+            def get_usable_length(self, seq_length=None):
+                """Return usable cache length for the current sequence"""
+                if hasattr(self, 'get_seq_length'):
+                    return self.get_seq_length()
+                if self.key_cache and len(self.key_cache) > 0 and self.key_cache[0] is not None:
+                    return self.key_cache[0].shape[2]
+                return 0
+
+            DynamicCache.get_usable_length = get_usable_length
+            logger.info("✅ DynamicCache.get_usable_length() method added")
+
+        logger.info(f"Loading model: {MODEL_NAME}")
+        logger.info("This may take several minutes on first run (downloading model)...")
+
+        # Detect device (CPU or GPU if available)
+        if torch.cuda.is_available():
+            device = "cuda"
+            torch_dtype = torch.float16
+            logger.info("GPU detected, using CUDA")
+        else:
+            device = "cpu"
+            torch_dtype = torch.float32
+            logger.info("No GPU detected, using CPU (CX53 32GB server)")
+
+        # Load tokenizer
+        logger.info("Loading tokenizer...")
+        processor = AutoTokenizer.from_pretrained(
+            MODEL_NAME,
+            trust_remote_code=True
         )
 
-        logger.info(f"Model loaded successfully: {MODEL_NAME}")
+        # Load model
+        logger.info("Loading model weights...")
+        model = AutoModel.from_pretrained(
+            MODEL_NAME,
+            trust_remote_code=True,
+            torch_dtype=torch_dtype,
+            device_map=device,
+            low_cpu_mem_usage=True,
+            attn_implementation="eager",
+        )
+
+        model.eval()
+
+        # Force all model parameters to float32 on CPU
+        if device == "cpu":
+            logger.info("Converting all model parameters to float32 for CPU compatibility...")
+            model = model.float()
+            for name, buffer in model.named_buffers():
+                if buffer.dtype == torch.bfloat16:
+                    buffer.data = buffer.data.float()
+            logger.info("✅ All model weights converted to float32")
+
+            logger.info("Setting global default dtype to float32 for CPU...")
+            torch.set_default_dtype(torch.float32)
+            logger.info("✅ Global default dtype set to float32")
+
+        logger.info(f"✅ Model loaded successfully on {device}")
+        logger.info(f"   Model: {MODEL_NAME}")
+        logger.info(f"   Device: {device}")
+        logger.info(f"   Dtype: {torch_dtype}")
+
+        return True
 
     except Exception as e:
-        logger.error(f"Failed to load model: {e}")
+        logger.error(f"❌ Failed to load model: {e}")
         logger.error("Server will start but OCR inference will fail until model is loaded")
+        return False
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize the model on startup."""
+    logger.info(f"Starting nunoOcr server on {HOST}:{PORT}")
+    load_model()
 
 
 def verify_service_api_key(authorization: Optional[str] = Header(None)) -> bool:
@@ -182,11 +335,15 @@ async def health_check():
     ip_whitelist_enabled = len(ALLOWED_IPS) > 0
 
     return {
-        "status": "ok" if llm else "initializing",
+        "status": "ok" if model else "initializing",
         "ocr_model": MODEL_NAME,
-        "ocr_ready": llm is not None,
+        "ocr_ready": model is not None,
+        "ocr_device": device if device else "unknown",
+        "ocr_engine": "transformers",
         "vision_provider": VISION_PROVIDER,
         "vision_configured": vision_configured,
+        "version": VERSION,
+        "git_commit": GIT_COMMIT,
         "security": {
             "service_api_key_required": service_protected,
             "ip_whitelist_enabled": ip_whitelist_enabled,
@@ -223,55 +380,202 @@ async def list_models():
     }
 
 
+def extract_image_from_content(content: List[Dict]) -> Optional[Image.Image]:
+    """Extract PIL Image from message content."""
+    for item in content:
+        if isinstance(item, dict):
+            if item.get("type") == "input_image":
+                image_url = item.get("image_url", "")
+
+                # Handle base64 data URI
+                if image_url.startswith("data:image"):
+                    try:
+                        # Extract base64 data
+                        base64_data = image_url.split(",")[1]
+                        image_bytes = base64.b64decode(base64_data)
+                        image = Image.open(io.BytesIO(image_bytes))
+                        return image.convert("RGB")
+                    except Exception as e:
+                        logger.error(f"Failed to decode image: {e}")
+
+    return None
+
+
+def extract_text_prompt(content: List[Dict]) -> str:
+    """Extract text prompt from message content."""
+    text_parts = []
+
+    for item in content:
+        if isinstance(item, dict):
+            if item.get("type") == "input_text":
+                text_parts.append(item.get("text", ""))
+
+    return " ".join(text_parts)
+
+
+def run_ocr_inference(image: Image.Image, full_prompt: str) -> str:
+    """
+    Run OCR inference synchronously (blocking).
+
+    This function is designed to be called from a thread pool to avoid blocking
+    the main event loop.
+    """
+    import tempfile
+    import shutil
+    import sys
+    from io import StringIO
+
+    # Initialize paths for cleanup
+    temp_image_path = None
+    temp_output_dir = None
+
+    try:
+        # Create temp file for input image
+        tmp_img_fd, temp_image_path = tempfile.mkstemp(suffix='.png', dir='/tmp')
+        os.close(tmp_img_fd)
+        image.save(temp_image_path)
+        logger.info(f"Saved image to: {temp_image_path}")
+
+        # Create temp directory for output
+        temp_output_dir = tempfile.mkdtemp(dir='/tmp')
+        logger.info(f"Created temp output directory: {temp_output_dir}")
+
+        # Capture stdout since model.infer() prints but doesn't return the text
+        logger.info("Calling CPU-patched model.infer()...")
+        captured_output = StringIO()
+        original_stdout = sys.stdout
+
+        try:
+            # Redirect stdout to capture printed output
+            sys.stdout = captured_output
+
+            generated_text = model.infer(
+                tokenizer=processor,
+                prompt=full_prompt,
+                image_file=temp_image_path,
+                output_path=temp_output_dir,
+                save_results=False,
+                eval_mode=False
+            )
+        finally:
+            # Restore original stdout
+            sys.stdout = original_stdout
+
+        # Get captured text
+        captured_text = captured_output.getvalue()
+
+        # Clean the captured text - remove debug output
+        def clean_ocr_output(text: str) -> str:
+            """Remove debug lines from OCR output."""
+            lines = text.split('\n')
+            cleaned_lines = []
+
+            for line in lines:
+                # Skip debug lines
+                if any(debug_marker in line for debug_marker in [
+                    'BASE:', 'PATCHES:', 'torch.Size', '===========',
+                    'UserWarning', 'FutureWarning', 'DeprecationWarning',
+                    '/usr/local/lib/python', 'warnings.warn'
+                ]):
+                    continue
+
+                # Skip empty lines at the start
+                if not cleaned_lines and not line.strip():
+                    continue
+
+                cleaned_lines.append(line)
+
+            return '\n'.join(cleaned_lines).strip()
+
+        # Use captured stdout if model.infer() returned None
+        if generated_text is None or not generated_text.strip():
+            generated_text = clean_ocr_output(captured_text)
+            logger.info(f"✅ OCR completed - captured from stdout (length: {len(generated_text)} chars)")
+        else:
+            logger.info(f"✅ OCR completed - returned by model (length: {len(generated_text)} chars)")
+
+        if not generated_text:
+            raise ValueError("No OCR output generated - both return value and stdout are empty")
+
+        return generated_text
+
+    except Exception as e:
+        logger.error(f"Error during inference: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise
+    finally:
+        # Clean up temp files
+        if temp_image_path and os.path.exists(temp_image_path):
+            os.unlink(temp_image_path)
+            logger.info(f"Cleaned up temp image: {temp_image_path}")
+        if temp_output_dir and os.path.exists(temp_output_dir):
+            shutil.rmtree(temp_output_dir)
+            logger.info(f"Cleaned up temp output dir: {temp_output_dir}")
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
     """
-    OpenAI-compatible chat completions endpoint for OCR (prescriptions).
+    OpenAI-compatible chat completions endpoint with vision support for OCR (prescriptions).
     """
-    if llm is None:
+    if model is None or processor is None:
         raise HTTPException(
             status_code=503,
             detail="Model not loaded yet. Please wait and try again."
         )
 
     try:
-        from vllm import SamplingParams
-
-        # Extract messages and prepare prompt
+        # Extract messages
         messages = request.messages
-        prompt_parts = []
+
+        # Find image and text from messages
+        image = None
+        system_prompt = ""
+        user_prompt = ""
 
         for msg in messages:
             role = msg.role
             content = msg.content
 
-            if isinstance(content, str):
-                prompt_parts.append(f"{role}: {content}")
-            elif isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict):
-                        if item.get("type") == "input_text":
-                            prompt_parts.append(f"{role}: {item.get('text', '')}")
+            if role == "system":
+                system_prompt = content if isinstance(content, str) else ""
 
-        prompt = "\n".join(prompt_parts)
+            elif role == "user":
+                if isinstance(content, list):
+                    # Extract image
+                    extracted_image = extract_image_from_content(content)
+                    if extracted_image:
+                        image = extracted_image
 
-        # Sampling parameters
-        sampling_params = SamplingParams(
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-            top_p=request.top_p,
-        )
+                    # Extract text prompt
+                    user_prompt = extract_text_prompt(content)
+                elif isinstance(content, str):
+                    user_prompt = content
 
-        # Generate response
-        logger.info(f"Generating OCR response for prompt length: {len(prompt)}")
-        outputs = llm.generate([prompt], sampling_params)
-        generated_text = outputs[0].outputs[0].text
+        if image is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No image found in request. Please provide an image."
+            )
+
+        # Combine prompts
+        full_prompt = f"{system_prompt}\n\n{user_prompt}".strip()
+        if not full_prompt:
+            full_prompt = "Extract all text from this image."
+
+        logger.info(f"Processing OCR request (image size: {image.size})")
+        logger.info(f"Prompt: {full_prompt[:100]}...")
+
+        # Run OCR inference in a thread pool to avoid blocking the event loop
+        logger.info("Starting OCR in background thread...")
+        generated_text = await asyncio.to_thread(run_ocr_inference, image, full_prompt)
 
         # Format OpenAI-compatible response
         response = {
             "id": f"chatcmpl-{os.urandom(12).hex()}",
             "object": "chat.completion",
-            "created": 1234567890,
+            "created": int(datetime.now().timestamp()),
             "model": MODEL_NAME,
             "choices": [
                 {
@@ -284,17 +588,20 @@ async def chat_completions(request: ChatCompletionRequest):
                 }
             ],
             "usage": {
-                "prompt_tokens": len(prompt.split()),
+                "prompt_tokens": len(full_prompt.split()),
                 "completion_tokens": len(generated_text.split()),
-                "total_tokens": len(prompt.split()) + len(generated_text.split())
+                "total_tokens": len(full_prompt.split()) + len(generated_text.split())
             }
         }
 
         return response
 
     except Exception as e:
-        logger.error(f"Inference error: {e}")
-        raise HTTPException(status_code=500, detail=f"Inference failed: {str(e)}")
+        logger.error(f"OCR inference error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Inference failed: {str(e)}"
+        )
 
 
 def _image_to_base64(file_content: bytes) -> str:
