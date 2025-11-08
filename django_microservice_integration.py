@@ -37,6 +37,7 @@ class NunoOcrServiceClient:
     def __init__(
         self,
         base_url: str = "http://localhost:8765",
+        service_api_key: Optional[str] = None,
         timeout: int = 120
     ):
         """
@@ -44,10 +45,19 @@ class NunoOcrServiceClient:
 
         Args:
             base_url: URL du service nunoOcr (ex: http://nunoocr:8765)
+            service_api_key: API Key pour authentifier auprès du service nunoOcr
             timeout: Timeout en secondes
         """
         self.base_url = base_url.rstrip('/')
+        self.service_api_key = service_api_key
         self.timeout = timeout
+
+    def _get_headers(self) -> Dict[str, str]:
+        """Get HTTP headers including service API key if configured."""
+        headers = {}
+        if self.service_api_key:
+            headers['Authorization'] = f'Bearer {self.service_api_key}'
+        return headers
 
     def health_check(self) -> Dict[str, Any]:
         """
@@ -107,10 +117,11 @@ class NunoOcrServiceClient:
                 )
             }
 
-            # Appeler le service nunoOcr
+            # Appeler le service nunoOcr avec auth
             response = requests.post(
                 f"{self.base_url}/v1/analyze-wound",
                 files=files,
+                headers=self._get_headers(),
                 timeout=self.timeout
             )
 
@@ -174,11 +185,12 @@ class NunoOcrServiceClient:
                 'dates': ','.join(dates)
             }
 
-            # Appeler le service
+            # Appeler le service avec auth
             response = requests.post(
                 f"{self.base_url}/v1/compare-wound-progress",
                 files=files,
                 data=data,
+                headers=self._get_headers(),
                 timeout=self.timeout * 2  # Plus de temps pour plusieurs images
             )
 
@@ -220,9 +232,10 @@ from django.conf import settings
 
 
 # Créer une instance globale du client
-# Configuré avec l'URL du service nunoOcr
+# Configuré avec l'URL et la clé de service
 NUNOOCR_SERVICE = NunoOcrServiceClient(
-    base_url=getattr(settings, 'NUNOOCR_SERVICE_URL', 'http://localhost:8765')
+    base_url=getattr(settings, 'NUNOOCR_SERVICE_URL', 'http://localhost:8765'),
+    service_api_key=getattr(settings, 'NUNOOCR_SERVICE_API_KEY', None)
 )
 
 
@@ -452,11 +465,13 @@ Ajouter dans settings.py:
 # URL du service nunoOcr
 NUNOOCR_SERVICE_URL = os.getenv('NUNOOCR_SERVICE_URL', 'http://localhost:8765')
 
-# Ou si déployé avec Docker Compose:
-# NUNOOCR_SERVICE_URL = 'http://nunoocr:8765'
+# Service API Key pour authentifier auprès de nunoOcr
+NUNOOCR_SERVICE_API_KEY = os.getenv('NUNOOCR_SERVICE_API_KEY')  # REQUIS!
 
-# Ou si service externe:
-# NUNOOCR_SERVICE_URL = 'https://nunoocr.opefitoo.com'
+# Exemples selon déploiement:
+# - Si déployé avec Docker Compose: 'http://nunoocr:8765'
+# - Si service externe: 'http://46.224.6.193:8765'
+# - Si via domain: 'https://nunoocr.opefitoo.com'
 """
 
 

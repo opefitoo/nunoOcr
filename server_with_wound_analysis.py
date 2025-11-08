@@ -4,13 +4,17 @@ DeepSeek-OCR + Wound Analysis FastAPI server
 OpenAI-compatible API for:
 - OCR inference (DeepSeek-OCR for prescriptions)
 - Wound analysis (GPT-4 Vision or Claude Vision)
+
+Security:
+- Service API Key required for wound analysis endpoints
+- IP whitelist support
 """
 
 import os
 import logging
 import base64
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException, UploadFile, File, Header
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -28,6 +32,11 @@ PORT = int(os.getenv("PORT", "8000"))
 # Vision API configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 VISION_PROVIDER = os.getenv("VISION_PROVIDER", "openai")  # openai or anthropic
+
+# Security configuration
+SERVICE_API_KEY = os.getenv("SERVICE_API_KEY")  # API Key for service-to-service auth
+ALLOWED_IPS = os.getenv("ALLOWED_IPS", "").split(",") if os.getenv("ALLOWED_IPS") else []
+ALLOWED_DOMAINS = os.getenv("ALLOWED_DOMAINS", "").split(",") if os.getenv("ALLOWED_DOMAINS") else []
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -94,16 +103,95 @@ async def startup_event():
         logger.error("Server will start but OCR inference will fail until model is loaded")
 
 
+def verify_service_api_key(authorization: Optional[str] = Header(None)) -> bool:
+    """
+    Verify service API key for protected endpoints.
+
+    Returns:
+        True if authorized, raises HTTPException otherwise
+    """
+    # If no SERVICE_API_KEY is configured, allow all (backward compatibility)
+    if not SERVICE_API_KEY:
+        logger.warning("SERVICE_API_KEY not configured - endpoints are not protected!")
+        return True
+
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "Authorization required",
+                "message": "Service API Key required. Set 'Authorization: Bearer YOUR_SERVICE_KEY'"
+            }
+        )
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "Invalid authorization format",
+                "message": "Use 'Authorization: Bearer YOUR_SERVICE_KEY'"
+            }
+        )
+
+    provided_key = authorization[7:]  # Remove "Bearer "
+
+    if provided_key != SERVICE_API_KEY:
+        logger.warning(f"Invalid service API key attempt")
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "Invalid service API key",
+                "message": "The provided service API key is incorrect"
+            }
+        )
+
+    return True
+
+
+def verify_ip_whitelist(request: Request) -> bool:
+    """
+    Verify client IP is in whitelist if configured.
+
+    Returns:
+        True if authorized, raises HTTPException otherwise
+    """
+    if not ALLOWED_IPS:
+        return True  # No whitelist configured
+
+    client_ip = request.client.host
+
+    # Check if IP is in whitelist
+    if client_ip not in ALLOWED_IPS:
+        logger.warning(f"Rejected request from non-whitelisted IP: {client_ip}")
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "IP not allowed",
+                "message": f"Your IP ({client_ip}) is not authorized to access this service"
+            }
+        )
+
+    return True
+
+
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint (public - no auth required)."""
     vision_configured = OPENAI_API_KEY is not None
+    service_protected = SERVICE_API_KEY is not None
+    ip_whitelist_enabled = len(ALLOWED_IPS) > 0
+
     return {
         "status": "ok" if llm else "initializing",
         "ocr_model": MODEL_NAME,
         "ocr_ready": llm is not None,
         "vision_provider": VISION_PROVIDER,
-        "vision_configured": vision_configured
+        "vision_configured": vision_configured,
+        "security": {
+            "service_api_key_required": service_protected,
+            "ip_whitelist_enabled": ip_whitelist_enabled,
+            "allowed_ips_count": len(ALLOWED_IPS) if ip_whitelist_enabled else 0
+        }
     }
 
 
@@ -388,17 +476,20 @@ def _analyze_with_claude_vision(image_base64: str) -> Dict[str, Any]:
 
 @app.post("/v1/analyze-wound", response_model=WoundAnalysisResponse)
 async def analyze_wound(
+    request: Request,
     wound_image: UploadFile = File(...),
     authorization: Optional[str] = Header(None)
 ):
     """
     Analyze wound image using vision AI (GPT-4 Vision or Claude).
 
-    This endpoint is a proxy to OpenAI/Anthropic APIs so Django never needs
-    to know the vision API keys directly.
+    Security:
+    - Requires SERVICE_API_KEY in Authorization header
+    - Optional IP whitelist
 
     Usage from Django:
-        POST http://nunoocr:8765/v1/analyze-wound
+        POST http://46.224.6.193:8765/v1/analyze-wound
+        Authorization: Bearer YOUR_SERVICE_API_KEY
         Content-Type: multipart/form-data
 
         Body:
@@ -407,6 +498,10 @@ async def analyze_wound(
     Returns:
         JSON with structured wound analysis in French
     """
+    # Verify security
+    verify_service_api_key(authorization)
+    verify_ip_whitelist(request)
+
     try:
         # Read image
         image_content = await wound_image.read()
@@ -451,19 +546,30 @@ async def analyze_wound(
 
 @app.post("/v1/compare-wound-progress")
 async def compare_wound_progress(
+    request: Request,
     images: List[UploadFile] = File(...),
-    dates: Optional[str] = None  # Comma-separated dates
+    dates: Optional[str] = None,  # Comma-separated dates
+    authorization: Optional[str] = Header(None)
 ):
     """
     Compare multiple wound images over time to assess healing progress.
 
+    Security:
+    - Requires SERVICE_API_KEY in Authorization header
+    - Optional IP whitelist
+
     Usage:
-        POST http://nunoocr:8765/v1/compare-wound-progress
+        POST http://46.224.6.193:8765/v1/compare-wound-progress
+        Authorization: Bearer YOUR_SERVICE_API_KEY
 
         Body (multipart/form-data):
             images: file1, file2, file3
             dates: "2025-01-01,2025-01-07,2025-01-14"
     """
+    # Verify security
+    verify_service_api_key(authorization)
+    verify_ip_whitelist(request)
+
     try:
         if len(images) < 2:
             raise HTTPException(
