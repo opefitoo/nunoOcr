@@ -1086,6 +1086,236 @@ async def compare_wound_progress(
         )
 
 
+# =============================================================================
+# Text Processing Endpoints (using OpenAI GPT for text-only tasks)
+# =============================================================================
+
+# Prompts for report cleanup
+REPORT_CLEANUP_SYSTEM_PROMPT_FR = """Tu es un assistant spécialisé dans la correction de rapports de soins infirmiers en français.
+
+Ton rôle:
+1. Corriger les fautes d'orthographe et de grammaire
+2. Corriger la ponctuation
+3. Standardiser les abréviations médicales courantes (TA, FC, SpO2, etc.)
+4. Garder un style professionnel et concis
+
+Règles STRICTES:
+- NE JAMAIS ajouter d'informations qui ne sont pas dans le texte original
+- NE JAMAIS supprimer d'informations importantes
+- NE JAMAIS changer le sens du texte
+- Garder le sens exact du texte original
+- Utiliser les abréviations médicales standard
+- Retourner UNIQUEMENT le texte corrigé, sans explication ni commentaire"""
+
+REPORT_CLEANUP_USER_PROMPT_FR = """Corrige ce rapport de soin infirmier. Retourne uniquement le texte corrigé:
+
+{text}"""
+
+
+class ReportCleanupRequest(BaseModel):
+    """Request for cleaning up nursing reports."""
+    text: str
+    preserve_content: bool = True
+    language: str = "fr"
+
+
+class ReportCleanupResponse(BaseModel):
+    """Response for report cleanup."""
+    original_text: str
+    cleaned_text: str
+    prompt_used: str
+    changes_made: bool
+    model: str
+
+
+def _cleanup_text_with_openai(text: str) -> str:
+    """Clean up nursing report text using OpenAI GPT-4o-mini."""
+    if not OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI API key not configured"
+        )
+
+    url = "https://api.openai.com/v1/chat/completions"
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
+    }
+
+    payload = {
+        "model": "gpt-4o-mini",  # Cheaper and faster for text tasks
+        "messages": [
+            {
+                "role": "system",
+                "content": REPORT_CLEANUP_SYSTEM_PROMPT_FR
+            },
+            {
+                "role": "user",
+                "content": REPORT_CLEANUP_USER_PROMPT_FR.format(text=text)
+            }
+        ],
+        "max_tokens": len(text) * 2 + 100,
+        "temperature": 0.1  # Low temperature for consistency
+    }
+
+    logger.info(f"Calling OpenAI GPT-4o-mini for text cleanup (text length: {len(text)})")
+    response = requests.post(url, headers=headers, json=payload, timeout=30)
+
+    if response.status_code != 200:
+        logger.error(f"OpenAI API error: {response.status_code} - {response.text}")
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"OpenAI API error: {response.text}"
+        )
+
+    result = response.json()
+    cleaned_text = result['choices'][0]['message']['content'].strip()
+
+    # Remove quotes if model added them
+    if cleaned_text.startswith('"') and cleaned_text.endswith('"'):
+        cleaned_text = cleaned_text[1:-1]
+    if cleaned_text.startswith("'") and cleaned_text.endswith("'"):
+        cleaned_text = cleaned_text[1:-1]
+
+    return cleaned_text
+
+
+@app.post("/v1/report/cleanup", response_model=ReportCleanupResponse)
+async def cleanup_report(request: ReportCleanupRequest):
+    """
+    Clean up nursing report text using OpenAI GPT-4o-mini.
+    Corrects typos, grammar, and standardizes medical abbreviations.
+
+    This is a TEXT-ONLY endpoint (no image required).
+
+    Usage:
+        POST /v1/report/cleanup
+        {"text": "Pansemant fait, plaie propre"}
+
+    Returns:
+        {
+            "original_text": "Pansemant fait, plaie propre",
+            "cleaned_text": "Pansement fait, plaie propre.",
+            "prompt_used": "...",
+            "changes_made": true,
+            "model": "gpt-4o-mini"
+        }
+    """
+    if not request.text or not request.text.strip():
+        return ReportCleanupResponse(
+            original_text=request.text,
+            cleaned_text=request.text,
+            prompt_used="",
+            changes_made=False,
+            model="gpt-4o-mini"
+        )
+
+    try:
+        cleaned_text = _cleanup_text_with_openai(request.text)
+
+        return ReportCleanupResponse(
+            original_text=request.text,
+            cleaned_text=cleaned_text,
+            prompt_used=f"System: {REPORT_CLEANUP_SYSTEM_PROMPT_FR}\n\nUser: {REPORT_CLEANUP_USER_PROMPT_FR.format(text=request.text)}",
+            changes_made=(cleaned_text != request.text),
+            model="gpt-4o-mini"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Report cleanup error: {e}")
+        raise HTTPException(status_code=500, detail=f"Cleanup failed: {str(e)}")
+
+
+@app.post("/v1/report/cleanup/preview")
+async def cleanup_report_preview(request: ReportCleanupRequest):
+    """
+    Preview the prompts that would be used for cleanup without executing.
+    Useful for debugging and transparency.
+
+    Usage:
+        POST /v1/report/cleanup/preview
+        {"text": "Pansemant fait"}
+
+    Returns:
+        {
+            "system_prompt": "...",
+            "user_prompt": "...",
+            "original_text": "Pansemant fait",
+            "model": "gpt-4o-mini"
+        }
+    """
+    return {
+        "system_prompt": REPORT_CLEANUP_SYSTEM_PROMPT_FR,
+        "user_prompt": REPORT_CLEANUP_USER_PROMPT_FR.format(text=request.text),
+        "full_prompt": f"System: {REPORT_CLEANUP_SYSTEM_PROMPT_FR}\n\nUser: {REPORT_CLEANUP_USER_PROMPT_FR.format(text=request.text)}",
+        "original_text": request.text,
+        "model": "gpt-4o-mini"
+    }
+
+
+@app.post("/v1/text/chat")
+async def text_chat(request: ChatCompletionRequest):
+    """
+    Text-only chat completion endpoint using OpenAI GPT-4o-mini.
+    Unlike /v1/chat/completions, this does NOT require an image.
+
+    Usage:
+        POST /v1/text/chat
+        {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Hello!"}
+            ]
+        }
+    """
+    if not OPENAI_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI API key not configured"
+        )
+
+    url = "https://api.openai.com/v1/chat/completions"
+
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {OPENAI_API_KEY}"
+    }
+
+    # Convert messages to OpenAI format
+    messages = []
+    for msg in request.messages:
+        if isinstance(msg.content, str):
+            messages.append({"role": msg.role, "content": msg.content})
+        elif isinstance(msg.content, list):
+            # Extract text only
+            text_parts = [p.get("text", "") for p in msg.content if isinstance(p, dict) and p.get("type") == "text"]
+            messages.append({"role": msg.role, "content": " ".join(text_parts)})
+
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": messages,
+        "max_tokens": request.max_tokens,
+        "temperature": request.temperature,
+        "top_p": request.top_p
+    }
+
+    logger.info(f"Calling OpenAI GPT-4o-mini for text chat")
+    response = requests.post(url, headers=headers, json=payload, timeout=60)
+
+    if response.status_code != 200:
+        logger.error(f"OpenAI API error: {response.status_code} - {response.text}")
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"OpenAI API error: {response.text}"
+        )
+
+    return response.json()
+
+
 if __name__ == "__main__":
     logger.info(f"Starting nunoOcr server on {HOST}:{PORT}")
     logger.info(f"OCR Model: {MODEL_NAME}")
