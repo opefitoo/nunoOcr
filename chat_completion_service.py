@@ -86,6 +86,47 @@ class TextSummaryRequest(BaseModel):
     language: str = "fr"
 
 
+class EventReport(BaseModel):
+    """A single event report with date."""
+    date: str
+    report: str
+
+
+class PatientMedicalSummaryRequest(BaseModel):
+    """Request for generating a comprehensive medical summary from patient event reports."""
+    patient_id: int
+    patient_name: str
+    events: List[EventReport]
+    max_summary_length: int = 4000
+    language: str = "fr"
+
+
+class KeyMedicalFacts(BaseModel):
+    """Structured key medical facts extracted from reports."""
+    allergies: List[str] = []
+    chronic_conditions: List[str] = []
+    current_treatments: List[str] = []
+    hospitalizations: List[str] = []
+    important_events: List[str] = []
+    mobility_status: Optional[str] = None
+    cognitive_status: Optional[str] = None
+    skin_conditions: List[str] = []
+    vital_signs_alerts: List[str] = []
+    social_context: Optional[str] = None
+
+
+class PatientMedicalSummaryResponse(BaseModel):
+    """Response containing the generated medical summary."""
+    patient_id: int
+    patient_name: str
+    summary: str
+    key_facts: KeyMedicalFacts
+    events_analyzed: int
+    date_range: Dict[str, str]
+    generated_at: str
+    model: str
+
+
 # =============================================================================
 # Prompts
 # =============================================================================
@@ -116,6 +157,57 @@ Ne mentionne que les actions principales et observations importantes."""
 SUMMARY_USER_PROMPT_FR = """Résume ce rapport de soin en maximum {max_length} caractères:
 
 {text}"""
+
+
+# Patient Medical Summary Prompts
+MEDICAL_SUMMARY_SYSTEM_PROMPT_FR = """Tu es un assistant médical spécialisé dans l'analyse de dossiers de soins infirmiers.
+
+Ton rôle est d'analyser une série de rapports de soins d'un patient et d'en extraire un résumé médical structuré.
+
+Tu dois identifier et extraire:
+1. **Allergies** détectées ou mentionnées
+2. **Pathologies chroniques** (diabète, HTA, insuffisance cardiaque, etc.)
+3. **Traitements en cours** (médicaments, pansements, soins réguliers)
+4. **Hospitalisations** et événements médicaux majeurs
+5. **Événements importants** (chutes, incidents, changements d'état)
+6. **État de mobilité** (autonome, aide technique, fauteuil, alité)
+7. **État cognitif** (orienté, confus, démence, etc.)
+8. **État cutané** (escarres, plaies, ulcères)
+9. **Alertes constantes vitales** (HTA non contrôlée, hypoglycémies, etc.)
+10. **Contexte social** (vit seul, aidant naturel, isolement)
+
+RÈGLES IMPORTANTES:
+- Extraire UNIQUEMENT les informations présentes dans les rapports
+- Prioriser les informations les plus récentes
+- Ignorer les détails de routine (soins quotidiens normaux)
+- Mettre en avant les changements d'état et les alertes
+- Être concis et factuel
+- Répondre en JSON valide"""
+
+
+MEDICAL_SUMMARY_USER_PROMPT_FR = """Analyse ces {event_count} rapports de soins du patient "{patient_name}" (du {date_start} au {date_end}).
+
+Génère un résumé médical structuré en JSON avec ce format exact:
+{{
+    "summary": "Résumé narratif de l'état du patient et de son évolution (max 2000 caractères)",
+    "key_facts": {{
+        "allergies": ["liste des allergies détectées"],
+        "chronic_conditions": ["liste des pathologies chroniques"],
+        "current_treatments": ["traitements en cours"],
+        "hospitalizations": ["hospitalisations avec dates si disponibles"],
+        "important_events": ["événements marquants: chutes, incidents, changements d'état"],
+        "mobility_status": "description de l'état de mobilité ou null",
+        "cognitive_status": "description de l'état cognitif ou null",
+        "skin_conditions": ["problèmes cutanés: escarres, plaies"],
+        "vital_signs_alerts": ["alertes constantes: HTA, hypoglycémie"],
+        "social_context": "contexte social ou null"
+    }}
+}}
+
+RAPPORTS DE SOINS:
+{reports}
+
+Réponds UNIQUEMENT avec le JSON, sans texte avant ou après."""
 
 
 # =============================================================================
@@ -368,6 +460,131 @@ async def summarize_report(request: TextSummaryRequest):
     except Exception as e:
         logger.error(f"Summarization error: {e}")
         raise HTTPException(status_code=500, detail=f"Summarization failed: {str(e)}")
+
+
+@app.post("/v1/patient/medical-summary", response_model=PatientMedicalSummaryResponse)
+async def generate_patient_medical_summary(request: PatientMedicalSummaryRequest):
+    """
+    Generate a comprehensive medical summary from patient event reports.
+
+    This endpoint analyzes multiple event reports and extracts:
+    - Key medical facts (allergies, conditions, treatments)
+    - Important events and changes in patient status
+    - A narrative summary of the patient's medical history
+
+    Designed for overnight batch processing of patient records.
+    """
+    import json
+    from datetime import datetime
+
+    if llm is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Model not loaded yet. Please wait and try again."
+        )
+
+    if not request.events:
+        return PatientMedicalSummaryResponse(
+            patient_id=request.patient_id,
+            patient_name=request.patient_name,
+            summary="Aucun rapport de soin à analyser.",
+            key_facts=KeyMedicalFacts(),
+            events_analyzed=0,
+            date_range={"start": "", "end": ""},
+            generated_at=datetime.now().isoformat(),
+            model=MODEL_NAME
+        )
+
+    try:
+        from vllm import SamplingParams
+
+        # Sort events by date
+        sorted_events = sorted(request.events, key=lambda x: x.date)
+        date_start = sorted_events[0].date
+        date_end = sorted_events[-1].date
+
+        # Format reports for the prompt
+        # Limit to most recent reports if too many (to fit in context)
+        max_reports = 200  # Adjust based on model context size
+        events_to_analyze = sorted_events[-max_reports:] if len(sorted_events) > max_reports else sorted_events
+
+        reports_text = "\n\n".join([
+            f"[{event.date}] {event.report}"
+            for event in events_to_analyze
+            if event.report and event.report.strip()
+        ])
+
+        # Build prompts
+        system_prompt = MEDICAL_SUMMARY_SYSTEM_PROMPT_FR
+        user_prompt = MEDICAL_SUMMARY_USER_PROMPT_FR.format(
+            event_count=len(events_to_analyze),
+            patient_name=request.patient_name,
+            date_start=date_start,
+            date_end=date_end,
+            reports=reports_text
+        )
+
+        full_prompt = f"System: {system_prompt}\n\nUser: {user_prompt}\n\nAssistant:"
+
+        # Sampling parameters
+        sampling_params = SamplingParams(
+            temperature=0.2,  # Low temperature for consistency
+            max_tokens=request.max_summary_length,
+            top_p=0.95,
+        )
+
+        # Generate response
+        logger.info(f"Generating medical summary for patient {request.patient_id} ({len(events_to_analyze)} events)")
+        outputs = llm.generate([full_prompt], sampling_params)
+        response_text = outputs[0].outputs[0].text.strip()
+
+        # Parse JSON response
+        try:
+            # Clean up response - remove markdown code blocks if present
+            if response_text.startswith("```"):
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+            if response_text.endswith("```"):
+                response_text = response_text[:-3]
+
+            result = json.loads(response_text.strip())
+
+            key_facts = KeyMedicalFacts(
+                allergies=result.get("key_facts", {}).get("allergies", []) or [],
+                chronic_conditions=result.get("key_facts", {}).get("chronic_conditions", []) or [],
+                current_treatments=result.get("key_facts", {}).get("current_treatments", []) or [],
+                hospitalizations=result.get("key_facts", {}).get("hospitalizations", []) or [],
+                important_events=result.get("key_facts", {}).get("important_events", []) or [],
+                mobility_status=result.get("key_facts", {}).get("mobility_status"),
+                cognitive_status=result.get("key_facts", {}).get("cognitive_status"),
+                skin_conditions=result.get("key_facts", {}).get("skin_conditions", []) or [],
+                vital_signs_alerts=result.get("key_facts", {}).get("vital_signs_alerts", []) or [],
+                social_context=result.get("key_facts", {}).get("social_context")
+            )
+
+            summary = result.get("summary", "Résumé non disponible.")
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse JSON response, using raw text: {e}")
+            # Fallback: use raw response as summary
+            summary = response_text
+            key_facts = KeyMedicalFacts()
+
+        return PatientMedicalSummaryResponse(
+            patient_id=request.patient_id,
+            patient_name=request.patient_name,
+            summary=summary,
+            key_facts=key_facts,
+            events_analyzed=len(events_to_analyze),
+            date_range={"start": date_start, "end": date_end},
+            generated_at=datetime.now().isoformat(),
+            model=MODEL_NAME
+        )
+
+    except Exception as e:
+        logger.error(f"Medical summary generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")
 
 
 # =============================================================================
