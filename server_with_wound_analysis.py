@@ -1364,7 +1364,10 @@ async def cleanup_report_preview(request: ReportCleanupRequest):
 
 
 @app.post("/v1/patient/medical-summary", response_model=PatientMedicalSummaryResponse)
-async def generate_patient_medical_summary(request: PatientMedicalSummaryRequest):
+async def generate_patient_medical_summary(
+    request: PatientMedicalSummaryRequest,
+    authorization: Optional[str] = Header(None)
+):
     """
     Generate a comprehensive medical summary from patient event reports.
 
@@ -1375,8 +1378,12 @@ async def generate_patient_medical_summary(request: PatientMedicalSummaryRequest
 
     Designed for overnight batch processing of patient records.
 
+    Security:
+    - Requires SERVICE_API_KEY in Authorization header
+
     Usage:
         POST /v1/patient/medical-summary
+        Authorization: Bearer YOUR_SERVICE_API_KEY
         {
             "patient_id": 1365,
             "patient_name": "Dupont Jean",
@@ -1387,6 +1394,9 @@ async def generate_patient_medical_summary(request: PatientMedicalSummaryRequest
         }
     """
     import json
+
+    # Verify API key
+    verify_service_api_key(authorization)
 
     if not OPENAI_API_KEY:
         raise HTTPException(
