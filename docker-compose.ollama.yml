@@ -1,0 +1,77 @@
+# Docker Compose for nunoOcr with Ollama (FREE local LLM)
+#
+# This setup uses Ollama to run open-source models locally instead of paid OpenAI.
+# Recommended model: Qwen2.5:7B (best for French medical text)
+#
+# Usage:
+#   docker-compose -f docker-compose.ollama.yml up -d
+#
+# After startup, pull the model:
+#   docker exec ollama ollama pull qwen2.5:7b
+#
+# Test:
+#   curl http://localhost:11434/api/tags
+#
+version: '3.8'
+
+services:
+  # Ollama service - runs local LLM models
+  ollama:
+    image: ollama/ollama:latest
+    container_name: nunoocr_ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      # Persist models between restarts
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    # CPU only - no GPU required
+    # For GPU support, add:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # nunoOcr API service
+  nunoocr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nunoocr_api
+    restart: unless-stopped
+    ports:
+      - "8765:8000"
+    environment:
+      # OCR settings
+      - MODEL_NAME=deepseek-ai/DeepSeek-OCR
+      - HOST=0.0.0.0
+      - PORT=8000
+
+      # LLM Provider - use Ollama (FREE) instead of OpenAI (paid)
+      - LLM_PROVIDER=ollama
+      - OLLAMA_URL=http://ollama:11434
+      - LLM_MODEL=qwen2.5:7b
+
+      # Vision API (still uses OpenAI for image analysis)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - VISION_PROVIDER=openai
+
+      # Security
+      - SERVICE_API_KEY=${SERVICE_API_KEY}
+    depends_on:
+      - ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  ollama_data:
+    driver: local

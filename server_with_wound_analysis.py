@@ -44,6 +44,11 @@ BUILD_DATE = datetime.now().isoformat()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 VISION_PROVIDER = os.getenv("VISION_PROVIDER", "openai")  # openai or anthropic
 
+# LLM Provider configuration (for text generation tasks like medical summary)
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")  # "ollama" (free) or "openai" (paid)
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")  # Ollama server URL
+LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:7b")  # Model for text generation
+
 # Security configuration
 SERVICE_API_KEY = os.getenv("SERVICE_API_KEY")  # API Key for service-to-service auth
 ALLOWED_IPS = os.getenv("ALLOWED_IPS", "").split(",") if os.getenv("ALLOWED_IPS") else []
@@ -335,6 +340,15 @@ async def health_check():
     service_protected = SERVICE_API_KEY is not None
     ip_whitelist_enabled = len(ALLOWED_IPS) > 0
 
+    # Check Ollama availability
+    ollama_available = False
+    if LLM_PROVIDER == "ollama":
+        try:
+            resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=2)
+            ollama_available = resp.status_code == 200
+        except Exception:
+            pass
+
     return {
         "status": "ok" if model else "initializing",
         "ocr_model": MODEL_NAME,
@@ -343,6 +357,9 @@ async def health_check():
         "ocr_engine": "transformers",
         "vision_provider": VISION_PROVIDER,
         "vision_configured": vision_configured,
+        "llm_provider": LLM_PROVIDER,
+        "llm_model": LLM_MODEL,
+        "llm_available": ollama_available if LLM_PROVIDER == "ollama" else vision_configured,
         "version": VERSION,
         "git_commit": GIT_COMMIT,
         "security": {
@@ -1235,6 +1252,149 @@ RAPPORTS DE SOINS:
 Réponds UNIQUEMENT avec le JSON, sans texte avant ou après."""
 
 
+def _call_ollama(
+    system_prompt: str,
+    user_prompt: str,
+    model: str = None,
+    temperature: float = 0.1,
+    max_tokens: int = 4000,
+    response_format: str = None  # "json" for JSON mode
+) -> str:
+    """
+    Call Ollama API for text generation.
+
+    Uses local Ollama server with Qwen2.5 or other models.
+    FREE alternative to OpenAI.
+
+    Args:
+        system_prompt: System instructions
+        user_prompt: User message
+        model: Model name (defaults to LLM_MODEL env var)
+        temperature: Sampling temperature
+        max_tokens: Maximum tokens to generate
+        response_format: Set to "json" for JSON output mode
+
+    Returns:
+        Generated text response
+    """
+    model = model or LLM_MODEL
+    url = f"{OLLAMA_URL}/api/chat"
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "stream": False,
+        "options": {
+            "temperature": temperature,
+            "num_predict": max_tokens
+        }
+    }
+
+    # Enable JSON mode if requested
+    if response_format == "json":
+        payload["format"] = "json"
+
+    logger.info(f"Calling Ollama ({model}) for text generation")
+
+    try:
+        response = requests.post(url, json=payload, timeout=180)  # 3 min timeout for long texts
+
+        if response.status_code != 200:
+            logger.error(f"Ollama API error: {response.status_code} - {response.text}")
+            raise HTTPException(
+                status_code=503,
+                detail=f"Ollama API error: {response.text}"
+            )
+
+        result = response.json()
+        return result['message']['content'].strip()
+
+    except requests.exceptions.ConnectionError:
+        logger.error(f"Cannot connect to Ollama at {OLLAMA_URL}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Ollama server not available at {OLLAMA_URL}. Make sure Ollama is running."
+        )
+    except requests.exceptions.Timeout:
+        logger.error("Ollama request timed out")
+        raise HTTPException(
+            status_code=504,
+            detail="Ollama request timed out (180s). Try with fewer events."
+        )
+
+
+def _call_llm(
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float = 0.1,
+    max_tokens: int = 4000,
+    response_format: str = None
+) -> tuple[str, str]:
+    """
+    Call the configured LLM provider (Ollama or OpenAI).
+
+    Returns:
+        Tuple of (response_text, model_name)
+    """
+    if LLM_PROVIDER == "ollama":
+        response = _call_ollama(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format
+        )
+        return response, LLM_MODEL
+
+    elif LLM_PROVIDER == "openai":
+        if not OPENAI_API_KEY:
+            raise HTTPException(
+                status_code=503,
+                detail="OpenAI API key not configured"
+            )
+
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENAI_API_KEY}"
+        }
+
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature
+        }
+
+        if response_format == "json":
+            payload["response_format"] = {"type": "json_object"}
+
+        logger.info("Calling OpenAI GPT-4o-mini for text generation")
+        response = requests.post(url, headers=headers, json=payload, timeout=120)
+
+        if response.status_code != 200:
+            logger.error(f"OpenAI API error: {response.status_code} - {response.text}")
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"OpenAI API error: {response.text}"
+            )
+
+        result = response.json()
+        return result['choices'][0]['message']['content'].strip(), "gpt-4o-mini"
+
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unknown LLM provider: {LLM_PROVIDER}"
+        )
+
+
 def _cleanup_text_with_openai(text: str) -> str:
     """Clean up nursing report text using OpenAI GPT-4o-mini."""
     if not OPENAI_API_KEY:
@@ -1398,12 +1558,6 @@ async def generate_patient_medical_summary(
     # Verify API key
     verify_service_api_key(authorization)
 
-    if not OPENAI_API_KEY:
-        raise HTTPException(
-            status_code=503,
-            detail="OpenAI API key not configured for medical summary generation"
-        )
-
     if not request.events:
         return PatientMedicalSummaryResponse(
             patient_id=request.patient_id,
@@ -1413,7 +1567,7 @@ async def generate_patient_medical_summary(
             events_analyzed=0,
             date_range={"start": "", "end": ""},
             generated_at=datetime.now().isoformat(),
-            model="gpt-4o-mini"
+            model=LLM_MODEL if LLM_PROVIDER == "ollama" else "gpt-4o-mini"
         )
 
     try:
@@ -1442,29 +1596,16 @@ async def generate_patient_medical_summary(
             reports=reports_text
         )
 
-        # Call OpenAI
-        logger.info(f"Generating medical summary for patient {request.patient_id} ({len(events_to_analyze)} events)")
+        # Call LLM (Ollama or OpenAI based on configuration)
+        logger.info(f"Generating medical summary for patient {request.patient_id} ({len(events_to_analyze)} events) using {LLM_PROVIDER}")
 
-        url = "https://api.openai.com/v1/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {OPENAI_API_KEY}"
-        }
-        payload = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": MEDICAL_SUMMARY_SYSTEM_PROMPT_FR},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0.2,
-            "max_tokens": request.max_summary_length
-        }
-
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
-        response.raise_for_status()
-        result = response.json()
-
-        response_text = result['choices'][0]['message']['content'].strip()
+        response_text, model_used = _call_llm(
+            system_prompt=MEDICAL_SUMMARY_SYSTEM_PROMPT_FR,
+            user_prompt=user_prompt,
+            temperature=0.2,
+            max_tokens=request.max_summary_length,
+            response_format="json"
+        )
 
         # Parse JSON response
         try:
@@ -1506,7 +1647,7 @@ async def generate_patient_medical_summary(
             events_analyzed=len(events_to_analyze),
             date_range={"start": date_start, "end": date_end},
             generated_at=datetime.now().isoformat(),
-            model="gpt-4o-mini"
+            model=model_used
         )
 
     except requests.exceptions.Timeout:
