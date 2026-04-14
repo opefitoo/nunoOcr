@@ -37,7 +37,8 @@ RUN pip install --no-cache-dir \
     "sentencepiece>=0.1.99" \
     "opencv-python-headless>=4.8.0" \
     "numpy>=1.24.0" \
-    "scipy>=1.10.0"
+    "scipy>=1.10.0" \
+    "slowapi>=0.1.9"
 
 # Copy the transformers-based server with wound analysis
 # Context is now . (root) so we can access directly
