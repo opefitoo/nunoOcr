@@ -12,19 +12,28 @@ Security:
 
 import os
 import io
+import time
 import logging
 import base64
 import asyncio
+from collections import defaultdict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, UploadFile, File, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 import uvicorn
 import requests
 import torch
 from PIL import Image
+
+# Rate limiting (slowapi)
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +62,104 @@ LLM_MODEL = os.getenv("LLM_MODEL", "qwen2.5:7b")  # Model for text generation
 SERVICE_API_KEY = os.getenv("SERVICE_API_KEY")  # API Key for service-to-service auth
 ALLOWED_IPS = os.getenv("ALLOWED_IPS", "").split(",") if os.getenv("ALLOWED_IPS") else []
 ALLOWED_DOMAINS = os.getenv("ALLOWED_DOMAINS", "").split(",") if os.getenv("ALLOWED_DOMAINS") else []
+ALLOWED_CORS_ORIGINS = [
+    o.strip() for o in os.getenv("ALLOWED_CORS_ORIGINS", "").split(",") if o.strip()
+]
+
+
+# =============================================================================
+# Security helpers (PII redaction, image validation, failed-auth lockout)
+# =============================================================================
+
+def _redact(text: Optional[str], max_len: int = 40) -> str:
+    """Return a non-PII length hint instead of raw text for logging."""
+    if text is None:
+        return "<none>"
+    try:
+        n = len(text)
+    except TypeError:
+        return "<non-text>"
+    return f"<{n} chars>"
+
+
+def _validate_image_upload(upload: UploadFile, content: bytes) -> None:
+    """
+    Validate an uploaded image: check MIME type and verify the bytes actually
+    decode as a valid image via PIL. Raises HTTPException on failure.
+
+    Call AFTER the size check.
+    """
+    allowed_mime = {"image/jpeg", "image/png", "image/webp"}
+    if upload.content_type not in allowed_mime:
+        raise HTTPException(
+            status_code=415,
+            detail="Type de fichier non supporté. Formats acceptés: JPEG, PNG, WebP."
+        )
+    try:
+        with Image.open(io.BytesIO(content)) as img:
+            img.verify()
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Image invalide ou corrompue."
+        )
+
+
+# --- Failed-auth lockout (per-process; acceptable for single-replica deploy) ---
+# Keyed by client IP. Stores a list of recent failure timestamps and an optional
+# lockout-until timestamp. NOT shared across workers/replicas.
+_FAILED_AUTH: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"failures": [], "locked_until": 0.0})
+_AUTH_FAIL_WINDOW = 300  # seconds (5 min)
+_AUTH_FAIL_THRESHOLD = 5
+_AUTH_LOCK_DURATION = 300  # seconds (5 min)
+
+
+def _auth_check_lockout(ip: str) -> None:
+    """Raise 429 if this IP is currently locked out."""
+    entry = _FAILED_AUTH.get(ip)
+    if not entry:
+        return
+    now = time.time()
+    if entry.get("locked_until", 0) > now:
+        retry_after = int(entry["locked_until"] - now)
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "Too many failed authentication attempts",
+                "retry_after_seconds": retry_after,
+            },
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+def _auth_record_failure(ip: str) -> None:
+    """Record a failed auth attempt; lock the IP out if threshold exceeded."""
+    now = time.time()
+    entry = _FAILED_AUTH[ip]
+    # Drop stale failures outside the window.
+    entry["failures"] = [t for t in entry["failures"] if now - t < _AUTH_FAIL_WINDOW]
+    entry["failures"].append(now)
+    if len(entry["failures"]) >= _AUTH_FAIL_THRESHOLD:
+        entry["locked_until"] = now + _AUTH_LOCK_DURATION
+        entry["failures"] = []
+        logger.warning(f"Auth lockout engaged for IP {ip} ({_AUTH_LOCK_DURATION}s)")
+
+
+def _auth_record_success(ip: str) -> None:
+    """Reset failure counter for this IP after a successful auth."""
+    if ip in _FAILED_AUTH:
+        _FAILED_AUTH.pop(ip, None)
+
+
+# --- Rate limiter identity: API key when present, else client IP ---
+def _rate_limit_key(request: Request) -> str:
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        return f"key:{auth[7:][:16]}"
+    return f"ip:{get_remote_address(request)}"
+
+
+limiter = Limiter(key_func=_rate_limit_key)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -61,14 +168,35 @@ app = FastAPI(
     version="2.0.0"
 )
 
-# CORS middleware
+# CORS middleware - origins restricted via ALLOWED_CORS_ORIGINS env var.
+# Defaults to [] (no cross-origin access) when the env var is not set.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_CORS_ORIGINS,
+    allow_credentials=bool(ALLOWED_CORS_ORIGINS),
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+
+# Security headers middleware - applied to every response.
+# HTTPS is terminated by Traefik/Dokploy, so HSTS here is safe.
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+# Rate limiting: attach limiter, exception handler, and middleware.
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 # Global model instances (transformers-based)
 model = None
@@ -262,48 +390,58 @@ async def startup_event():
     load_model()
 
 
-def verify_service_api_key(authorization: Optional[str] = Header(None)) -> bool:
+def verify_service_api_key(
+    authorization: Optional[str] = Header(None),
+    request: Optional[Request] = None,
+) -> bool:
     """
     Verify service API key for protected endpoints.
 
+    Enforces a per-IP failed-attempt lockout: after 5 failed attempts within
+    5 minutes, the IP is returned 429 for 5 minutes.
+
+    NOTE: The lockout state is per-process; acceptable for single-replica
+    deployments. For multi-replica setups this would need a shared store.
+
     Returns:
-        True if authorized, raises HTTPException otherwise
+        True if authorized, raises HTTPException otherwise.
     """
+    client_ip = "unknown"
+    if request is not None and request.client:
+        client_ip = request.client.host
+
+    # Enforce lockout first (even before checking config) to avoid bypass.
+    _auth_check_lockout(client_ip)
+
     # If no SERVICE_API_KEY is configured, allow all (backward compatibility)
     if not SERVICE_API_KEY:
         logger.warning("SERVICE_API_KEY not configured - endpoints are not protected!")
         return True
 
-    if not authorization:
+    def _fail(status_code: int, error: str, message: str):
+        _auth_record_failure(client_ip)
         raise HTTPException(
-            status_code=401,
-            detail={
-                "error": "Authorization required",
-                "message": "Service API Key required. Set 'Authorization: Bearer YOUR_SERVICE_KEY'"
-            }
+            status_code=status_code,
+            detail={"error": error, "message": message},
         )
 
+    if not authorization:
+        _fail(401, "Authorization required",
+              "Service API Key required. Set 'Authorization: Bearer YOUR_SERVICE_KEY'")
+
     if not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": "Invalid authorization format",
-                "message": "Use 'Authorization: Bearer YOUR_SERVICE_KEY'"
-            }
-        )
+        _fail(401, "Invalid authorization format",
+              "Use 'Authorization: Bearer YOUR_SERVICE_KEY'")
 
     provided_key = authorization[7:]  # Remove "Bearer "
 
     if provided_key != SERVICE_API_KEY:
-        logger.warning(f"Invalid service API key attempt")
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": "Invalid service API key",
-                "message": "The provided service API key is incorrect"
-            }
-        )
+        logger.warning(f"Invalid service API key attempt from {client_ip}")
+        _fail(401, "Invalid service API key",
+              "The provided service API key is incorrect")
 
+    # Successful auth: reset failure counter for this IP.
+    _auth_record_success(client_ip)
     return True
 
 
@@ -533,7 +671,8 @@ def run_ocr_inference(image: Image.Image, full_prompt: str) -> str:
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest):
+@limiter.limit("200/minute")
+async def chat_completions(request: Request, payload: ChatCompletionRequest):
     """
     OpenAI-compatible chat completions endpoint with vision support for OCR (prescriptions).
     """
@@ -545,7 +684,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
     try:
         # Extract messages
-        messages = request.messages
+        messages = payload.messages
 
         # Find image and text from messages
         image = None
@@ -583,7 +722,8 @@ async def chat_completions(request: ChatCompletionRequest):
             full_prompt = "Extract all text from this image."
 
         logger.info(f"Processing OCR request (image size: {image.size})")
-        logger.info(f"Prompt: {full_prompt[:100]}...")
+        # Do not log prompt content (may contain PII).
+        logger.info(f"Prompt received: {_redact(full_prompt)}")
 
         # Run OCR inference in a thread pool to avoid blocking the event loop
         logger.info("Starting OCR in background thread...")
@@ -800,6 +940,7 @@ def _analyze_with_claude_vision(image_base64: str) -> Dict[str, Any]:
 
 
 @app.post("/v1/analyze-wound", response_model=WoundAnalysisResponse)
+@limiter.limit("60/minute")
 async def analyze_wound(
     request: Request,
     wound_image: UploadFile = File(...),
@@ -824,7 +965,7 @@ async def analyze_wound(
         JSON with structured wound analysis in French
     """
     # Verify security
-    verify_service_api_key(authorization)
+    verify_service_api_key(authorization, request)
     verify_ip_whitelist(request)
 
     try:
@@ -837,6 +978,9 @@ async def analyze_wound(
                 status_code=400,
                 detail="Image trop grande (max 5MB)"
             )
+
+        # Validate MIME type and decode
+        _validate_image_upload(wound_image, image_content)
 
         # Convert to base64
         image_base64 = _image_to_base64(image_content)
@@ -870,6 +1014,7 @@ async def analyze_wound(
 
 
 @app.post("/v2/analyze-wound")
+@limiter.limit("60/minute")
 async def analyze_wound_v2_sse(
     request: Request,
     wound_image: UploadFile = File(...),
@@ -938,7 +1083,7 @@ async def analyze_wound_v2_sse(
         - event: error - Error information
     """
     # Verify security
-    verify_service_api_key(authorization)
+    verify_service_api_key(authorization, request)
     verify_ip_whitelist(request)
 
     async def event_generator():
@@ -957,6 +1102,15 @@ async def analyze_wound_v2_sse(
                     "error": "Image trop grande (max 5MB)"
                 }
                 yield f"event: error\ndata: {error_data}\n\n"
+                return
+
+            # Validate MIME type and decode
+            try:
+                _validate_image_upload(wound_image, image_content)
+            except HTTPException as ve:
+                import json as _json
+                err = {"success": False, "error": str(ve.detail), "status_code": ve.status_code}
+                yield f"event: error\ndata: {_json.dumps(err)}\n\n"
                 return
 
             yield f"event: progress\ndata: {{'message': 'Image reçue, préparation...', 'percent': 20}}\n\n"
@@ -1030,6 +1184,7 @@ async def analyze_wound_v2_sse(
 
 
 @app.post("/v1/compare-wound-progress")
+@limiter.limit("60/minute")
 async def compare_wound_progress(
     request: Request,
     images: List[UploadFile] = File(...),
@@ -1052,7 +1207,7 @@ async def compare_wound_progress(
             dates: "2025-01-01,2025-01-07,2025-01-14"
     """
     # Verify security
-    verify_service_api_key(authorization)
+    verify_service_api_key(authorization, request)
     verify_ip_whitelist(request)
 
     try:
@@ -1449,7 +1604,8 @@ def _cleanup_text_with_openai(text: str) -> str:
 
 
 @app.post("/v1/report/cleanup", response_model=ReportCleanupResponse)
-async def cleanup_report(request: ReportCleanupRequest):
+@limiter.limit("200/minute")
+async def cleanup_report(request: Request, payload: ReportCleanupRequest):
     """
     Clean up nursing report text using OpenAI GPT-4o-mini.
     Corrects typos, grammar, and standardizes medical abbreviations.
@@ -1459,33 +1615,24 @@ async def cleanup_report(request: ReportCleanupRequest):
     Usage:
         POST /v1/report/cleanup
         {"text": "Pansemant fait, plaie propre"}
-
-    Returns:
-        {
-            "original_text": "Pansemant fait, plaie propre",
-            "cleaned_text": "Pansement fait, plaie propre.",
-            "prompt_used": "...",
-            "changes_made": true,
-            "model": "gpt-4o-mini"
-        }
     """
-    if not request.text or not request.text.strip():
+    if not payload.text or not payload.text.strip():
         return ReportCleanupResponse(
-            original_text=request.text,
-            cleaned_text=request.text,
+            original_text=payload.text,
+            cleaned_text=payload.text,
             prompt_used="",
             changes_made=False,
             model="gpt-4o-mini"
         )
 
     try:
-        cleaned_text = _cleanup_text_with_openai(request.text)
+        cleaned_text = _cleanup_text_with_openai(payload.text)
 
         return ReportCleanupResponse(
-            original_text=request.text,
+            original_text=payload.text,
             cleaned_text=cleaned_text,
-            prompt_used=f"System: {REPORT_CLEANUP_SYSTEM_PROMPT_FR}\n\nUser: {REPORT_CLEANUP_USER_PROMPT_FR.format(text=request.text)}",
-            changes_made=(cleaned_text != request.text),
+            prompt_used=f"System: {REPORT_CLEANUP_SYSTEM_PROMPT_FR}\n\nUser: {REPORT_CLEANUP_USER_PROMPT_FR.format(text=payload.text)}",
+            changes_made=(cleaned_text != payload.text),
             model="gpt-4o-mini"
         )
 
@@ -1497,7 +1644,8 @@ async def cleanup_report(request: ReportCleanupRequest):
 
 
 @app.post("/v1/report/cleanup/preview")
-async def cleanup_report_preview(request: ReportCleanupRequest):
+@limiter.limit("200/minute")
+async def cleanup_report_preview(request: Request, payload: ReportCleanupRequest):
     """
     Preview the prompts that would be used for cleanup without executing.
     Useful for debugging and transparency.
@@ -1516,16 +1664,18 @@ async def cleanup_report_preview(request: ReportCleanupRequest):
     """
     return {
         "system_prompt": REPORT_CLEANUP_SYSTEM_PROMPT_FR,
-        "user_prompt": REPORT_CLEANUP_USER_PROMPT_FR.format(text=request.text),
-        "full_prompt": f"System: {REPORT_CLEANUP_SYSTEM_PROMPT_FR}\n\nUser: {REPORT_CLEANUP_USER_PROMPT_FR.format(text=request.text)}",
-        "original_text": request.text,
+        "user_prompt": REPORT_CLEANUP_USER_PROMPT_FR.format(text=payload.text),
+        "full_prompt": f"System: {REPORT_CLEANUP_SYSTEM_PROMPT_FR}\n\nUser: {REPORT_CLEANUP_USER_PROMPT_FR.format(text=payload.text)}",
+        "original_text": payload.text,
         "model": "gpt-4o-mini"
     }
 
 
 @app.post("/v1/patient/medical-summary", response_model=PatientMedicalSummaryResponse)
+@limiter.limit("60/minute")
 async def generate_patient_medical_summary(
-    request: PatientMedicalSummaryRequest,
+    request: Request,
+    payload: PatientMedicalSummaryRequest,
     authorization: Optional[str] = Header(None)
 ):
     """
@@ -1556,12 +1706,19 @@ async def generate_patient_medical_summary(
     import json
 
     # Verify API key
-    verify_service_api_key(authorization)
+    verify_service_api_key(authorization, request)
 
-    if not request.events:
+    # Hard cap: reject egregiously large event lists.
+    if payload.events and len(payload.events) > 1000:
+        raise HTTPException(
+            status_code=400,
+            detail="Trop d'événements fournis (maximum 1000)."
+        )
+
+    if not payload.events:
         return PatientMedicalSummaryResponse(
-            patient_id=request.patient_id,
-            patient_name=request.patient_name,
+            patient_id=payload.patient_id,
+            patient_name=payload.patient_name,
             summary="Aucun rapport de soin à analyser.",
             key_facts=KeyMedicalFacts(),
             events_analyzed=0,
@@ -1572,13 +1729,17 @@ async def generate_patient_medical_summary(
 
     try:
         # Sort events by date
-        sorted_events = sorted(request.events, key=lambda x: x.date)
+        sorted_events = sorted(payload.events, key=lambda x: x.date)
         date_start = sorted_events[0].date
         date_end = sorted_events[-1].date
 
         # Format reports for the prompt
-        # Limit to most recent reports if too many (to fit in context)
+        # Soft cap at 200; log only the count (no PII).
         max_reports = 200
+        if len(sorted_events) > max_reports:
+            logger.warning(
+                f"Medical summary: truncating events from {len(sorted_events)} to {max_reports}"
+            )
         events_to_analyze = sorted_events[-max_reports:] if len(sorted_events) > max_reports else sorted_events
 
         reports_text = "\n\n".join([
@@ -1590,20 +1751,24 @@ async def generate_patient_medical_summary(
         # Build prompts
         user_prompt = MEDICAL_SUMMARY_USER_PROMPT_FR.format(
             event_count=len(events_to_analyze),
-            patient_name=request.patient_name,
+            patient_name=payload.patient_name,
             date_start=date_start,
             date_end=date_end,
             reports=reports_text
         )
 
-        # Call LLM (Ollama or OpenAI based on configuration)
-        logger.info(f"Generating medical summary for patient {request.patient_id} ({len(events_to_analyze)} events) using {LLM_PROVIDER}")
+        # Call LLM (Ollama or OpenAI based on configuration).
+        # Log only IDs/counts/operation — never the prompt or patient name.
+        logger.info(
+            f"Generating medical summary patient_id={payload.patient_id} "
+            f"events={len(events_to_analyze)} provider={LLM_PROVIDER}"
+        )
 
         response_text, model_used = _call_llm(
             system_prompt=MEDICAL_SUMMARY_SYSTEM_PROMPT_FR,
             user_prompt=user_prompt,
             temperature=0.2,
-            max_tokens=request.max_summary_length,
+            max_tokens=payload.max_summary_length,
             response_format="json"
         )
 
@@ -1640,8 +1805,8 @@ async def generate_patient_medical_summary(
             key_facts = KeyMedicalFacts()
 
         return PatientMedicalSummaryResponse(
-            patient_id=request.patient_id,
-            patient_name=request.patient_name,
+            patient_id=payload.patient_id,
+            patient_name=payload.patient_name,
             summary=summary,
             key_facts=key_facts,
             events_analyzed=len(events_to_analyze),
@@ -1651,7 +1816,7 @@ async def generate_patient_medical_summary(
         )
 
     except requests.exceptions.Timeout:
-        logger.error(f"Timeout generating medical summary for patient {request.patient_id}")
+        logger.error(f"Timeout generating medical summary for patient_id={payload.patient_id}")
         raise HTTPException(status_code=504, detail="Request timed out")
     except requests.exceptions.RequestException as e:
         logger.error(f"Request error generating medical summary: {e}")
@@ -1662,7 +1827,8 @@ async def generate_patient_medical_summary(
 
 
 @app.post("/v1/text/chat")
-async def text_chat(request: ChatCompletionRequest):
+@limiter.limit("200/minute")
+async def text_chat(request: Request, payload: ChatCompletionRequest):
     """
     Text-only chat completion endpoint using OpenAI GPT-4o-mini.
     Unlike /v1/chat/completions, this does NOT require an image.
@@ -1692,7 +1858,7 @@ async def text_chat(request: ChatCompletionRequest):
 
     # Convert messages to OpenAI format
     messages = []
-    for msg in request.messages:
+    for msg in payload.messages:
         if isinstance(msg.content, str):
             messages.append({"role": msg.role, "content": msg.content})
         elif isinstance(msg.content, list):
@@ -1700,16 +1866,16 @@ async def text_chat(request: ChatCompletionRequest):
             text_parts = [p.get("text", "") for p in msg.content if isinstance(p, dict) and p.get("type") == "text"]
             messages.append({"role": msg.role, "content": " ".join(text_parts)})
 
-    payload = {
+    openai_payload = {
         "model": "gpt-4o-mini",
         "messages": messages,
-        "max_tokens": request.max_tokens,
-        "temperature": request.temperature,
-        "top_p": request.top_p
+        "max_tokens": payload.max_tokens,
+        "temperature": payload.temperature,
+        "top_p": payload.top_p
     }
 
-    logger.info(f"Calling OpenAI GPT-4o-mini for text chat")
-    response = requests.post(url, headers=headers, json=payload, timeout=60)
+    logger.info("Calling OpenAI GPT-4o-mini for text chat")
+    response = requests.post(url, headers=headers, json=openai_payload, timeout=60)
 
     if response.status_code != 200:
         logger.error(f"OpenAI API error: {response.status_code} - {response.text}")

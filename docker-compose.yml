@@ -48,8 +48,10 @@ services:
       - USE_FLASH_ATTENTION=0
       - PYTORCH_ENABLE_MPS_FALLBACK=1
 
-    ports:
-      - "8765:8000"
+    # Only expose internally on the docker network; Traefik (same network) reaches it.
+    # Do not publish to the host — external TLS is terminated by Traefik/Dokploy.
+    expose:
+      - "8000"
 
     volumes:
       # Cache Hugging Face models (persistent)

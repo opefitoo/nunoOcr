@@ -9,5 +9,8 @@ Pillow>=10.0.0
 # PDF to image conversion (optional, for multi-page PDF support)
 pdf2image>=1.17.0
 
+# Rate limiting for FastAPI (server_with_wound_analysis.py)
+slowapi>=0.1.9
+
 # For Django integration (optional)
 # Django>=4.2.0

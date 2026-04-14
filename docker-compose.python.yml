@@ -29,8 +29,9 @@ services:
       - VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
       - CUDA_VISIBLE_DEVICES=0  # GPU to use (if available)
 
-    ports:
-      - "8765:8000"
+    # Only expose internally on the docker network; Traefik (same network) reaches it.
+    expose:
+      - "8000"
 
     volumes:
       # Cache Hugging Face models
