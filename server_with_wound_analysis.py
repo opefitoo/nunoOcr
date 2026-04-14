@@ -1551,55 +1551,22 @@ def _call_llm(
 
 
 def _cleanup_text_with_openai(text: str) -> str:
-    """Clean up nursing report text using OpenAI GPT-4o-mini."""
-    if not OPENAI_API_KEY:
-        raise HTTPException(
-            status_code=503,
-            detail="OpenAI API key not configured"
-        )
+    """Clean up nursing report text using the configured LLM provider (ollama/openai).
 
-    url = "https://api.openai.com/v1/chat/completions"
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {OPENAI_API_KEY}"
-    }
-
-    payload = {
-        "model": "gpt-4o-mini",  # Cheaper and faster for text tasks
-        "messages": [
-            {
-                "role": "system",
-                "content": REPORT_CLEANUP_SYSTEM_PROMPT_FR
-            },
-            {
-                "role": "user",
-                "content": REPORT_CLEANUP_USER_PROMPT_FR.format(text=text)
-            }
-        ],
-        "max_tokens": len(text) * 2 + 100,
-        "temperature": 0.1  # Low temperature for consistency
-    }
-
-    logger.info(f"Calling OpenAI GPT-4o-mini for text cleanup (text length: {len(text)})")
-    response = requests.post(url, headers=headers, json=payload, timeout=30)
-
-    if response.status_code != 200:
-        logger.error(f"OpenAI API error: {response.status_code} - {response.text}")
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=f"OpenAI API error: {response.text}"
-        )
-
-    result = response.json()
-    cleaned_text = result['choices'][0]['message']['content'].strip()
-
+    Name kept for backwards compatibility — actually routes through _call_llm,
+    so it respects LLM_PROVIDER (defaults to ollama / Qwen, free)."""
+    cleaned_text, _model = _call_llm(
+        system_prompt=REPORT_CLEANUP_SYSTEM_PROMPT_FR,
+        user_prompt=REPORT_CLEANUP_USER_PROMPT_FR.format(text=text),
+        temperature=0.1,
+        max_tokens=len(text) * 2 + 100,
+    )
+    cleaned_text = cleaned_text.strip()
     # Remove quotes if model added them
     if cleaned_text.startswith('"') and cleaned_text.endswith('"'):
         cleaned_text = cleaned_text[1:-1]
     if cleaned_text.startswith("'") and cleaned_text.endswith("'"):
         cleaned_text = cleaned_text[1:-1]
-
     return cleaned_text
 
 
@@ -1843,48 +1810,53 @@ async def text_chat(request: Request, payload: ChatCompletionRequest):
             ]
         }
     """
-    if not OPENAI_API_KEY:
-        raise HTTPException(
-            status_code=503,
-            detail="OpenAI API key not configured"
-        )
-
-    url = "https://api.openai.com/v1/chat/completions"
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {OPENAI_API_KEY}"
-    }
-
-    # Convert messages to OpenAI format
-    messages = []
+    # Route through the configured LLM provider (LLM_PROVIDER=ollama by default).
+    # Collapse messages into a single system + user prompt for _call_llm.
+    system_parts = []
+    user_parts = []
     for msg in payload.messages:
         if isinstance(msg.content, str):
-            messages.append({"role": msg.role, "content": msg.content})
+            text = msg.content
         elif isinstance(msg.content, list):
-            # Extract text only
-            text_parts = [p.get("text", "") for p in msg.content if isinstance(p, dict) and p.get("type") == "text"]
-            messages.append({"role": msg.role, "content": " ".join(text_parts)})
+            text = " ".join(
+                p.get("text", "") for p in msg.content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        else:
+            text = ""
+        if msg.role == "system":
+            system_parts.append(text)
+        else:
+            user_parts.append(text)
 
-    openai_payload = {
-        "model": "gpt-4o-mini",
-        "messages": messages,
-        "max_tokens": payload.max_tokens,
-        "temperature": payload.temperature,
-        "top_p": payload.top_p
+    system_prompt = "\n\n".join(p for p in system_parts if p) or "You are a helpful assistant."
+    user_prompt = "\n\n".join(p for p in user_parts if p)
+
+    response_text, model_used = _call_llm(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        temperature=payload.temperature,
+        max_tokens=payload.max_tokens or 1024,
+    )
+
+    return {
+        "id": f"chatcmpl-{os.urandom(12).hex()}",
+        "object": "chat.completion",
+        "created": int(datetime.now().timestamp()),
+        "model": model_used,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": response_text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": len(system_prompt) + len(user_prompt),
+            "completion_tokens": len(response_text),
+            "total_tokens": len(system_prompt) + len(user_prompt) + len(response_text),
+        },
     }
-
-    logger.info("Calling OpenAI GPT-4o-mini for text chat")
-    response = requests.post(url, headers=headers, json=openai_payload, timeout=60)
-
-    if response.status_code != 200:
-        logger.error(f"OpenAI API error: {response.status_code} - {response.text}")
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=f"OpenAI API error: {response.text}"
-        )
-
-    return response.json()
 
 
 if __name__ == "__main__":
